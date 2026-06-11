@@ -1,6 +1,6 @@
 {
   "name": "jumpserver-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenAPI-driven CLI for JumpServer.",
   "type": "module",
   "keywords": [
