@@ -141,3 +141,5 @@ npm pack --dry-run
 ```
 
 `prepublishOnly` runs `npm run verify` before a real publish, and `prepack` builds `dist` before the tarball is created. Use `npm version patch`, `npm version minor`, or `npm version major` before publishing subsequent releases, then push the generated tag and publish a GitHub Release for that tag. Prereleases are published with the npm `next` dist-tag; normal releases use `latest`.
+
+The workflow can also be run manually from GitHub Actions by choosing a tag such as `v0.1.0` and an npm dist-tag (`latest` or `next`).
