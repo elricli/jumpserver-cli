@@ -71,4 +71,4 @@ jobs:
           if [ "$EVENT_NAME" = "release" ] && [ "$RELEASE_PRERELEASE" = "true" ]; then
             dist_tag="next"
           fi
-          npm publish --provenance --tag "$dist_tag"
+          npm publish --provenance --access public --tag "$dist_tag"
