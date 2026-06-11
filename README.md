@@ -1,6 +1,6 @@
 # jumpserver-cli
 
-OpenAPI-driven CLI for the JumpServer instance documented by `api.json`.
+OpenAPI-driven CLI for JumpServer.
 
 ## Requirements
 
@@ -49,7 +49,7 @@ Successful `auth token` also persists the host and returned Bearer token. The co
 2. `$XDG_CONFIG_HOME/jms/config.json`
 3. `~/.config/jms/config.json`
 
-Runtime precedence is: command-line flags, environment variables, saved config, then the built-in default host.
+Runtime precedence is: command-line flags, environment variables, then saved config. A host is required unless it has already been saved by `auth token` or `auth access-key`.
 
 ## Usage
 
@@ -111,6 +111,12 @@ Request options:
 ```bash
 npm run verify
 npm run build
+```
+
+The raw Swagger/OpenAPI export is intentionally not tracked or published. If you need to refresh the command catalog, place a local `api.json` in the repository root and run:
+
+```bash
+npm run generate:operations
 ```
 
 To test locally without touching your real config:

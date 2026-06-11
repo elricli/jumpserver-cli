@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { operations as generatedOperations } from "./generated-operations.js";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
 
@@ -61,7 +62,16 @@ interface SwaggerParameter {
 
 const METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
 
-export function loadOperations(apiPath = resolveApiJsonPath()): ApiOperation[] {
+export function loadOperations(apiPath?: string): ApiOperation[] {
+  if (!apiPath) {
+    return generatedOperations.map((operation) => ({
+      ...operation,
+      queryParameters: operation.queryParameters.map((parameter) => ({ ...parameter })),
+      pathParameters: operation.pathParameters.map((parameter) => ({ ...parameter })),
+      ...(operation.bodySchema ? { bodySchema: { ...operation.bodySchema } } : {})
+    }));
+  }
+
   const document = JSON.parse(readFileSync(apiPath, "utf8")) as SwaggerDocument;
   return extractOperations(document);
 }

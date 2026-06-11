@@ -73,7 +73,6 @@ interface AccessKeyAuthCommandOptions {
   dryRun?: boolean;
 }
 
-const DEFAULT_HOST = "jumpserver.xiaoe-tools.com";
 const AUTH_COMPLETE_MESSAGE = "认证完成";
 const ASSET_TABLE_COLUMNS = [
   "id",
@@ -148,9 +147,8 @@ const GROUP_DESCRIPTIONS = new Map<string, string>([
   ["users profile", "Current user profile"]
 ]);
 
-function resolveBaseUrl(host: string | undefined): string {
-  const value = host ?? DEFAULT_HOST;
-  return value.includes("://") ? value : `https://${value}`;
+function resolveBaseUrl(host: string): string {
+  return host.includes("://") ? host : `https://${host}`;
 }
 
 export function operationCommandPath(operation: ApiOperation): string[] {
@@ -463,7 +461,7 @@ async function runLogin(
   try {
     const globalOptions = resolveGlobalOptions(command, context);
     const resolvedCommandOptions = resolveLoginCommandOptions(commandOptions, context.env);
-    const host = commandOptions.host ?? globalOptions.host;
+    const host = resolveRequiredHost(commandOptions.host ?? globalOptions.host);
     const body = await buildLoginBody(resolvedCommandOptions, context.prompt);
     const plan = await createRequestPlan({
       operation,
@@ -502,10 +500,11 @@ async function runOperation(
 ): Promise<void> {
   try {
     const globalOptions = resolveGlobalOptions(command, context);
+    const host = resolveRequiredHost(globalOptions.host);
     const requestValues = collectRequestValues(operation, commandOptions);
     const planInput = {
       operation,
-      baseUrl: resolveBaseUrl(globalOptions.host),
+      baseUrl: resolveBaseUrl(host),
       pathValues: requestValues.pathValues,
       queryValues: requestValues.queryValues,
       basePath: operation.basePath,
@@ -544,7 +543,7 @@ async function runAccessKeyAuth(
 ): Promise<void> {
   try {
     const globalOptions = resolveGlobalOptions(command, context);
-    const host = commandOptions.host ?? globalOptions.host;
+    const host = resolveRequiredHost(commandOptions.host ?? globalOptions.host);
     const accessKeyId = commandOptions.accessKeyId ?? globalOptions.accessKeyId;
     const accessKeySecret = commandOptions.accessKeySecret ?? globalOptions.accessKeySecret;
     const org = commandOptions.org ?? globalOptions.org;
@@ -603,11 +602,10 @@ async function runAccessKeyAuth(
   }
 }
 
-function resolveGlobalOptions(command: Command, context: RunContext): GlobalOptions & { host: string } {
+function resolveGlobalOptions(command: Command, context: RunContext): GlobalOptions {
   const options = command.optsWithGlobals<GlobalOptions>();
-  const resolved: GlobalOptions & { host: string } = {
-    host: options.host ?? context.env.JMS_HOST ?? context.config.host ?? DEFAULT_HOST
-  };
+  const resolved: GlobalOptions = {};
+  setIfDefined(resolved, "host", options.host ?? context.env.JMS_HOST ?? context.config.host);
   setIfDefined(resolved, "accessKeyId", options.accessKeyId ?? context.env.JMS_ACCESS_KEY_ID ?? context.config.accessKeyId);
   setIfDefined(
     resolved,
@@ -618,6 +616,13 @@ function resolveGlobalOptions(command: Command, context: RunContext): GlobalOpti
   setIfDefined(resolved, "privateToken", options.privateToken ?? context.env.JMS_PRIVATE_TOKEN ?? context.config.privateToken);
   setIfDefined(resolved, "org", options.org ?? context.env.JMS_ORG ?? context.config.org);
   return resolved;
+}
+
+function resolveRequiredHost(host: string | undefined): string {
+  if (!host) {
+    throw new Error("Missing JumpServer host. Pass --host, set JMS_HOST, or run auth with --host to save one.");
+  }
+  return host;
 }
 
 function resolveLoginCommandOptions(

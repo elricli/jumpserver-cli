@@ -34,11 +34,13 @@ const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "
 const operations = loadOperations();
 const program = buildProgram({ operations });
 const commandNames = new Set(program.commands.map((command) => command.name()));
-const rawOperations = loadRawOperations(resolveApiJsonPath());
-const rawOperationIds = new Set(rawOperations.map((operation) => operation.operationId));
+const rawOperations = tryLoadRawOperations();
+const rawOperationIds = new Set((rawOperations ?? []).map((operation) => operation.operationId));
 const loadedOperationIds = new Set(operations.map((operation) => operation.operationId));
-const missingLoadedOperations = rawOperations.filter((operation) => !loadedOperationIds.has(operation.operationId));
-const extraLoadedOperations = operations.filter((operation) => !rawOperationIds.has(operation.operationId));
+const missingLoadedOperations = rawOperations?.filter((operation) => !loadedOperationIds.has(operation.operationId)) ?? [];
+const extraLoadedOperations = rawOperations
+  ? operations.filter((operation) => !rawOperationIds.has(operation.operationId))
+  : [];
 const missingHierarchicalCommands = operations
   .filter((operation) => !findCommandPath(program, operationCommandPath(operation)))
   .map((operation) => ({
@@ -48,16 +50,18 @@ const missingHierarchicalCommands = operations
 const directOperationCommands = operations
   .filter((operation) => commandNames.has(operation.operationId))
   .map((operation) => operation.operationId);
-const unsupportedParameters = rawOperations.flatMap((operation) =>
-  operation.parameters
-    .filter((parameter) => !["query", "path", "body"].includes(parameter.in))
-    .map((parameter) => ({ ...operation, parameter }))
-);
-const duplicateOperationIds = findDuplicates(rawOperations.map((operation) => operation.operationId));
-const missingOperationIds = rawOperations.filter((operation) => operation.operationId.length === 0);
+const unsupportedParameters =
+  rawOperations?.flatMap((operation) =>
+    operation.parameters
+      .filter((parameter) => !["query", "path", "body"].includes(parameter.in))
+      .map((parameter) => ({ ...operation, parameter }))
+  ) ?? [];
+const duplicateOperationIds = findDuplicates((rawOperations ?? []).map((operation) => operation.operationId));
+const missingOperationIds = rawOperations?.filter((operation) => operation.operationId.length === 0) ?? [];
 
 if (
-  rawOperations.length !== 221 ||
+  (rawOperations !== undefined && rawOperations.length !== 221) ||
+  operations.length !== 221 ||
   missingLoadedOperations.length > 0 ||
   extraLoadedOperations.length > 0 ||
   missingHierarchicalCommands.length > 0 ||
@@ -70,7 +74,7 @@ if (
     JSON.stringify(
       {
         ok: false,
-        rawOperationCount: rawOperations.length,
+        rawOperationCount: rawOperations?.length,
         expectedRawOperationCount: 221,
         loadedOperationCount: operations.length,
         coveredOperationCount: operations.length - missingHierarchicalCommands.length,
@@ -92,7 +96,8 @@ if (
     JSON.stringify(
       {
         ok: true,
-        rawOperationCount: rawOperations.length,
+        rawOperationCount: rawOperations?.length,
+        rawApiJson: rawOperations ? "checked" : "not present",
         loadedOperationCount: operations.length,
         coveredOperationCount: operations.length,
         coverage: "100%"
@@ -101,6 +106,18 @@ if (
       2
     )
   );
+}
+
+function tryLoadRawOperations(): RawOperation[] | undefined {
+  try {
+    return loadRawOperations(resolveApiJsonPath());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("Unable to locate api.json")) {
+      return undefined;
+    }
+    throw error;
+  }
 }
 
 function findCommandPath(command: Command, path: string[]): Command | undefined {

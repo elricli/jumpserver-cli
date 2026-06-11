@@ -140,6 +140,28 @@ describe("CLI command surface", () => {
     expect(optionFlags(accessKey)).not.toContain("--base-url <url>");
   });
 
+  it("requires a configured host instead of using an internal default target", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const previousExitCode = process.exitCode;
+    process.exitCode = undefined;
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value)
+    });
+
+    await program.parseAsync(
+      ["node", "jms", "--token", "token", "users", "profile", "read", "--dry-run"],
+      { from: "node" }
+    );
+
+    expect(stdout).toEqual([]);
+    expect(stderr.join("")).toContain("Missing JumpServer host");
+    expect(process.exitCode).toBe(1);
+    process.exitCode = previousExitCode;
+  });
+
   it("prints resource-oriented descriptions in group help", () => {
     const program = buildTestProgram();
     const assets = findCommandPath(program, ["assets"]);

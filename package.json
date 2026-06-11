@@ -22,13 +22,13 @@
   },
   "files": [
     "dist",
-    "api.json",
     "README.md"
   ],
   "scripts": {
     "build": "tsgo -p tsconfig.build.json",
     "test": "vitest run",
     "typecheck": "tsgo -p tsconfig.json --noEmit",
+    "generate:operations": "tsx scripts/generate-operations.ts",
     "coverage:api": "tsx scripts/check-api-coverage.ts",
     "verify": "npm test && npm run typecheck && npm run coverage:api",
     "prepublishOnly": "npm run verify",
