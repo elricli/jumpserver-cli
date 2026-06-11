@@ -1,0 +1,52 @@
+{
+  "name": "jumpserver-cli",
+  "version": "0.1.0",
+  "description": "OpenAPI-driven CLI for JumpServer.",
+  "type": "module",
+  "keywords": [
+    "jumpserver",
+    "cli",
+    "openapi"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elricli/jumpserver-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/elricli/jumpserver-cli/issues"
+  },
+  "homepage": "https://github.com/elricli/jumpserver-cli#readme",
+  "bin": {
+    "jumpserver-cli": "dist/cli.js",
+    "jms": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "api.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsgo -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsgo -p tsconfig.json --noEmit",
+    "coverage:api": "tsx scripts/check-api-coverage.ts",
+    "verify": "npm test && npm run typecheck && npm run coverage:api",
+    "prepublishOnly": "npm run verify",
+    "prepack": "npm run build"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "commander": "15.0.0"
+  },
+  "devDependencies": {
+    "@typescript/native-preview": "beta",
+    "@types/node": "25.9.2",
+    "tsx": "4.22.4",
+    "vitest": "4.1.8"
+  }
+}
