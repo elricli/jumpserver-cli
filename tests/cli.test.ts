@@ -40,6 +40,27 @@ describe("CLI command surface", () => {
     expect(commandNames.has("assets_favorite-assets_read")).toBe(false);
   });
 
+  it("collapses repeated OpenAPI tag segments in command paths", () => {
+    const operations = loadOperations();
+    const program = buildTestProgram({ operations });
+    const assetsMatch = findOperationForTest(operations, "assets_assets_match");
+    const accountsUsernameSuggestions = findOperationForTest(operations, "accounts_accounts_username_suggestions");
+
+    expect(operationCommandPath(assetsMatch)).toEqual(["assets", "match"]);
+    expect(operationCommandPath(accountsUsernameSuggestions)).toEqual(["accounts", "username", "suggestions"]);
+    expect(findCommandPath(program, ["assets", "match"])).toBeTruthy();
+    expect(findCommandPath(program, ["accounts", "username", "suggestions"])).toBeTruthy();
+    expect(findCommandPath(program, ["assets", "assets"])).toBeUndefined();
+    expect(findCommandPath(program, ["accounts", "accounts"])).toBeUndefined();
+
+    for (const operation of operations) {
+      const path = operationCommandPath(operation);
+      for (let index = 1; index < path.length; index += 1) {
+        expect(path[index], operation.operationId).not.toBe(path[index - 1]);
+      }
+    }
+  });
+
   it("reads the CLI version from package metadata", async () => {
     const directory = await mkdtemp(join(tmpdir(), "jms-package-"));
     const packageJsonPath = join(directory, "package.json");
@@ -168,11 +189,12 @@ describe("CLI command surface", () => {
     const help = assets?.helpInformation() ?? "";
 
     expect(help).toContain("Asset inventory commands");
-    expect(help).toContain("assets                       Asset records");
     expect(help).toContain("databases                    Database assets");
     expect(help).toContain("favorite-assets              Favorite assets");
+    expect(help).toContain("match [options]              Search asset records");
     expect(help).toContain("protocols                    Asset protocols");
     expect(help).not.toContain("Work with assets");
+    expect(help).not.toContain("assets                       Asset records");
   });
 
   it("prints user-oriented operation help without API method or path", () => {
@@ -263,7 +285,6 @@ describe("CLI command surface", () => {
         "https://jumpserver.example.test",
         "--token",
         "token",
-        "assets",
         "assets",
         "match",
         "--limit",
@@ -461,7 +482,6 @@ describe("CLI command surface", () => {
         "--token",
         "token",
         "assets",
-        "assets",
         "match"
       ],
       { from: "node" }
@@ -512,7 +532,6 @@ describe("CLI command surface", () => {
         "https://jumpserver.example.test",
         "--token",
         "token",
-        "assets",
         "assets",
         "match",
         "--json"
@@ -974,4 +993,10 @@ function findCommandPath(
 
 function optionFlags(command: ReturnType<typeof buildProgram> | undefined): string[] {
   return command?.options.map((option) => option.flags) ?? [];
+}
+
+function findOperationForTest(operations: ReturnType<typeof loadOperations>, operationId: string) {
+  const operation = operations.find((candidate) => candidate.operationId === operationId);
+  expect(operation).toBeTruthy();
+  return operation!;
 }

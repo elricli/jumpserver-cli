@@ -126,7 +126,6 @@ const GROUP_DESCRIPTIONS = new Map<string, string>([
   ["terminal", "Terminal component and session commands"],
   ["tickets", "Ticket workflow commands"],
   ["users", "User and profile commands"],
-  ["assets assets", "Asset records"],
   ["assets categories", "Asset categories"],
   ["assets clouds", "Cloud assets"],
   ["assets customs", "Custom assets"],
@@ -146,6 +145,9 @@ const GROUP_DESCRIPTIONS = new Map<string, string>([
   ["users connection-token", "User connection tokens"],
   ["users profile", "Current user profile"]
 ]);
+const RESOURCE_LABELS_BY_TAG = new Map<string, string>([
+  ["assets_assets", "Asset records"]
+]);
 
 function resolveBaseUrl(host: string): string {
   return host.includes("://") ? host : `https://${host}`;
@@ -157,11 +159,15 @@ export function operationCommandPath(operation: ApiOperation): string[] {
     ? operation.operationId.slice(operation.tag.length + 1)
     : operation.operationId;
   const actionParts = actionText.split("_").filter((part) => part.length > 0);
-  return [...tagParts, ...actionParts].map(toCommandName);
+  return collapseAdjacentDuplicates([...tagParts, ...actionParts]).map(toCommandName);
 }
 
 function toCommandName(value: string): string {
   return value.replaceAll("_", "-");
+}
+
+function collapseAdjacentDuplicates(values: string[]): string[] {
+  return values.filter((value, index) => index === 0 || value !== values[index - 1]);
 }
 
 export function buildProgram(options: BuildProgramOptions = {}): Command {
@@ -336,8 +342,21 @@ function describeCommandGroup(path: string[]): string {
 function describeOperationCommand(operation: ApiOperation): string {
   const path = operationCommandPath(operation);
   const action = path[path.length - 1] ?? operation.method.toLowerCase();
-  const resource = lowerFirst(resourceLabel(path.slice(0, -1)));
+  const resource = lowerFirst(operationResourceLabel(operation, path.slice(0, -1)));
   return actionPhrase(action, resource);
+}
+
+function operationResourceLabel(operation: ApiOperation, path: string[]): string {
+  const originalTagPath = operation.tag.split("_").filter((part) => part.length > 0).map(toCommandName);
+  const originalTagResourceLabel = RESOURCE_LABELS_BY_TAG.get(operation.tag);
+  if (originalTagResourceLabel) {
+    return originalTagResourceLabel;
+  }
+  const originalDescription = GROUP_DESCRIPTIONS.get(originalTagPath.join(" "));
+  if (originalDescription && originalTagPath.length !== path.length) {
+    return originalDescription.replace(/ commands$/i, "");
+  }
+  return resourceLabel(path);
 }
 
 function actionPhrase(action: string, resource: string): string {
