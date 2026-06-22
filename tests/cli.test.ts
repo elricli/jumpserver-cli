@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildProgram, isDirectCliInvocation, operationCommandPath, readPackageVersion } from "../src/cli.js";
+import {
+  buildProgram,
+  isDirectCliInvocation,
+  operationCommandPath,
+  readPackageVersion
+} from "../src/cli.js";
 import { loadOperations } from "../src/openapi.js";
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -38,6 +43,7 @@ describe("CLI command surface", () => {
     expect(commandNames.has("assets")).toBe(true);
     expect(commandNames.has("users")).toBe(true);
     expect(commandNames.has("assets_favorite-assets_read")).toBe(false);
+    expect(findCommandPath(program, ["assets", "databases", "token"])).toBeTruthy();
   });
 
   it("collapses repeated OpenAPI tag segments in command paths", () => {
@@ -218,6 +224,1254 @@ describe("CLI command surface", () => {
     expect(help).toContain("Body: none");
     expect(help).toContain("Example:");
     expect(help).toContain("jms assets databases match --query search=value");
+  });
+
+  it("prints Web UI-style connection tables for all selected database token credentials by default", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const requests: Array<{ url: string; method: string | undefined; body?: string }> = [];
+    const selectedAssets = [
+      {
+        id: "database-1",
+        name: "prod-main-db",
+        address: "10.0.0.10",
+        protocols: [{ name: "mysql", port: 3306 }]
+      },
+      {
+        id: "database-2",
+        name: "prod-report-db",
+        address: "10.0.0.11",
+        protocols: [{ name: "mysql", port: 3306 }]
+      }
+    ];
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      databaseAssetSelect: async () => selectedAssets,
+      fetcher: (async (input, init) => {
+        const url = String(input);
+        requests.push({
+          url,
+          method: init?.method,
+          ...(typeof init?.body === "string" ? { body: init.body } : {})
+        });
+
+        const path = new URL(url).pathname;
+        if (path === "/api/v1/perms/users/self/assets/") {
+          return jsonResponse({ count: selectedAssets.length, results: selectedAssets });
+        }
+        if (path === "/api/v1/accounts/accounts/username-suggestions/") {
+          const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { assets?: string[] };
+          return jsonResponse([body.assets?.[0] === "database-1" ? "main-user" : "report-user"], 201);
+        }
+        if (path === "/api/v1/users/connection-token/") {
+          const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { account?: string; asset?: string };
+          const suffix = body.asset === "database-1" ? "main" : "report";
+          return jsonResponse(
+            {
+              id: `connection-token-${suffix}`,
+              value: `${suffix}-password`,
+              date_expired: `2026-06-12T10:00:0${suffix === "main" ? "1" : "2"}+08:00`
+            },
+            201
+          );
+        }
+        if (path === "/api/v1/users/connection-token/connection-token-main/client-url/") {
+          return jsonResponse({
+            url: jmsUrl({
+              id: "connection-token-main",
+              value: "main-password",
+              protocol: "mysql",
+              token: { id: "connection-token-main", value: "main-password" },
+              endpoint: { host: "jumpserver.example.test", port: 33061 }
+            })
+          });
+        }
+        if (path === "/api/v1/users/connection-token/connection-token-report/client-url/") {
+          return jsonResponse({
+            url: jmsUrl({
+              id: "connection-token-report",
+              value: "report-password",
+              protocol: "mysql",
+              token: { id: "connection-token-report", value: "report-password" },
+              endpoint: { host: "jumpserver.example.test", port: 33062 }
+            })
+          });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${path}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "databases",
+        "token",
+        "prod-*"
+      ],
+      { from: "node" }
+    );
+
+    const output = stdout.join("");
+    const tokenCreateBodies = requests
+      .filter((request) => request.url.endsWith("/api/v1/users/connection-token/"))
+      .map((request) => JSON.parse(request.body ?? "{}"));
+    const usernameSuggestionBodies = requests.filter((request) =>
+      request.url.endsWith("/api/v1/accounts/accounts/username-suggestions/")
+    ).map((request) => JSON.parse(request.body ?? "{}"));
+
+    expect(stderr).toEqual([]);
+    expect(usernameSuggestionBodies).toEqual([
+      { username: "", assets: ["database-1"] },
+      { username: "", assets: ["database-2"] }
+    ]);
+    expect(tokenCreateBodies).toMatchObject([
+      {
+        asset: "database-1",
+        account: "prod-main-db-账号",
+        input_username: "main-user",
+        connect_options: {
+          reusable: false
+        }
+      },
+      {
+        asset: "database-2",
+        account: "prod-report-db-账号",
+        input_username: "report-user",
+        connect_options: {
+          reusable: false
+        }
+      }
+    ]);
+    expect(output).not.toContain("数据库 连接信息");
+    const lines = output.split("\n");
+    const firstTableBorderIndex = lines.findIndex((line) => line.startsWith("┌"));
+    const firstTableBorder = lines[firstTableBorderIndex];
+    expect(firstTableBorder).toMatch(/^┌─+┬─+┐$/);
+    expect(lines[firstTableBorderIndex + 1]).toMatch(/^│ 名称\s+│ prod-main-db \(10\.0\.0\.10\)\s+│$/);
+    expect(lines[firstTableBorderIndex + 2]).toMatch(/^├─+┼─+┤$/);
+    expect(lines[firstTableBorderIndex + 3]).toMatch(/^│ 主机\s+│ jumpserver\.example\.test\s+│$/);
+    expect(lines[firstTableBorderIndex + 4]).toMatch(/^├─+┼─+┤$/);
+    const noteLineIndex = lines.findIndex((line) => line.includes("数据库类型 token 会缓存 5 分钟"));
+    expect(lines[noteLineIndex]).toMatch(/^│ 说明\s+│ 数据库类型 token 会缓存 5 分钟.*│$/);
+    const noteEndLineIndex = lines.findIndex((line, index) => index > noteLineIndex && line.includes("完全失效"));
+    expect(lines[noteEndLineIndex]).toMatch(/^│\s+│ .*完全失效\s+│$/);
+    expect(lines[noteEndLineIndex + 1]).toMatch(/^├─+┼─+┤$/);
+    const commandLineIndex = lines.findIndex((line) => line.includes("MYSQL_PWD='main-password'"));
+    expect(lines[commandLineIndex]).toMatch(/^│ 连接命令行\s+│ MYSQL_PWD='main-password'.*│$/);
+    expect(lines[commandLineIndex + 1]).toMatch(/^└────────────┴─+┘$/);
+    expect(output).toContain("prod-main-db (10.0.0.10)");
+    expect(output).toContain("│ 主机");
+    expect(output).toContain("jumpserver.example.test");
+    expect(output).toContain("│ 端口");
+    expect(output).toContain("33061");
+    expect(output).toContain("│ 用户名");
+    expect(output).toContain("connection-token-main");
+    expect(output).toContain("│ 密码");
+    expect(output).toContain("main-password");
+    expect(output).toContain("│ 数据库");
+    expect(output).toContain("│ 协议");
+    expect(output).toContain("mysql");
+    expect(output).toContain("│ 过期时间");
+    expect(output).toContain("2026-06-12T10:00:01+08:00");
+    expect(output).toContain("│ 开启复用");
+    expect(output).toContain("否");
+    expect(output).toContain("│ 连接命令行");
+    expect(output).not.toContain("\n连接命令行\n");
+    expect(output).toContain("MYSQL_PWD='main-password' mysql -h 'jumpserver.example.test' -P 33061 -u 'connection-token-main'");
+    expect(output).toContain("prod-report-db (10.0.0.11)");
+    expect(output).toContain("MYSQL_PWD='report-password' mysql -h 'jumpserver.example.test' -P 33062 -u 'connection-token-report'");
+    expect(output).toMatch(/└[─]+┴[─]+┘\n\n[─]{10,}\n\n┌/);
+    expect(output).not.toContain("+----------");
+    expect(output).not.toContain("| 名称");
+    expect(output).not.toContain("\t");
+    expect(output).not.toContain("jms://");
+  });
+
+  it("prints token credentials for every permitted database asset with --all", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const assetRequestUrls: string[] = [];
+    const assetDetailRequestUrls: string[] = [];
+    const tokenCreateBodies: unknown[] = [];
+    const assets = [
+      {
+        id: "database-1",
+        name: "prod-main-db",
+        address: "10.0.0.10",
+        protocols: [{ name: "mysql", port: 3306 }]
+      },
+      {
+        id: "database-2",
+        name: "prod-report-db",
+        address: "10.0.0.11",
+        protocols: [{ name: "mysql", port: 3306 }]
+      },
+      {
+        id: "database-3",
+        name: "prod-audit-db",
+        address: "10.0.0.12",
+        protocols: [{ name: "mysql", port: 3306 }]
+      }
+    ];
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      confirm: async () => {
+        throw new Error("reusable prompt should not run when --all is used");
+      },
+      databaseAssetSelect: async () => {
+        throw new Error("database asset selector should not run when --all is used");
+      },
+      select: async () => {
+        throw new Error("select prompt should not run when --all is used");
+      },
+      fetcher: (async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/api/v1/perms/users/self/assets/") {
+          assetRequestUrls.push(url.href);
+          const offset = Number(url.searchParams.get("offset") ?? "0");
+          if (offset === 0) {
+            return jsonResponse({
+              count: assets.length,
+              next: "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&limit=2&offset=2",
+              results: assets.slice(0, 2)
+            });
+          }
+          if (offset === 2) {
+            return jsonResponse({
+              count: assets.length,
+              next: null,
+              results: assets.slice(2)
+            });
+          }
+        }
+        if (url.pathname === "/api/v1/accounts/accounts/username-suggestions/") {
+          const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { assets?: string[] };
+          const assetId = body.assets?.[0] ?? "database";
+          return jsonResponse([`${assetId}-user`, `${assetId}-readonly`], 201);
+        }
+        const assetDetailMatch = url.pathname.match(/^\/api\/v1\/perms\/users\/self\/assets\/([^/]+)\/$/);
+        if (assetDetailMatch) {
+          const assetId = assetDetailMatch[1]!;
+          assetDetailRequestUrls.push(url.href);
+          return jsonResponse({
+            id: assetId,
+            permed_accounts: [
+              {
+                id: `${assetId}-account-id`,
+                alias: `${assetId}-account-id`,
+                name: `${assetId}-account`,
+                username: `${assetId}-user`,
+                has_secret: true
+              }
+            ]
+          });
+        }
+        if (url.pathname === "/api/v1/users/connection-token/") {
+          const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { account?: string; asset?: string };
+          tokenCreateBodies.push(body);
+          if (body.account !== `${body.asset}-account-id`) {
+            return jsonResponse({ detail: "账号未找到" }, 404);
+          }
+          const suffix = body.asset?.replace("database-", "") ?? "unknown";
+          return jsonResponse(
+            {
+              id: `connection-token-${suffix}`,
+              value: `password-${suffix}`,
+              date_expired: `2026-06-12T10:00:0${suffix}+08:00`
+            },
+            201
+          );
+        }
+        const clientUrlMatch = url.pathname.match(
+          /^\/api\/v1\/users\/connection-token\/connection-token-(\d+)\/client-url\/$/
+        );
+        if (clientUrlMatch) {
+          const suffix = clientUrlMatch[1]!;
+          return jsonResponse({
+            url: jmsUrl({
+              id: `connection-token-${suffix}`,
+              value: `password-${suffix}`,
+              protocol: "mysql",
+              token: { id: `connection-token-${suffix}`, value: `password-${suffix}` },
+              endpoint: { host: "jumpserver.example.test", port: 33060 + Number(suffix) }
+            })
+          });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${url.pathname}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "databases",
+        "token",
+        "--all",
+        "--limit",
+        "2"
+      ],
+      { from: "node" }
+    );
+
+    const output = stdout.join("");
+
+    expect(stderr).toEqual([]);
+    expect(assetRequestUrls).toEqual([
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&limit=2",
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&limit=2&offset=2"
+    ]);
+    expect(assetDetailRequestUrls).toEqual([
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/database-1/",
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/database-2/",
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/database-3/"
+    ]);
+    expect(tokenCreateBodies).toMatchObject([
+      { asset: "database-1", account: "database-1-account-id", input_username: "database-1-user" },
+      { asset: "database-2", account: "database-2-account-id", input_username: "database-2-user" },
+      { asset: "database-3", account: "database-3-account-id", input_username: "database-3-user" }
+    ]);
+    expect(output).toContain("prod-main-db (10.0.0.10)");
+    expect(output).toContain("prod-report-db (10.0.0.11)");
+    expect(output).toContain("prod-audit-db (10.0.0.12)");
+    expect(output).toMatch(/└[─]+┴[─]+┘\n\n[─]{10,}\n\n┌/);
+    expect(output).not.toContain("数据库 连接信息");
+  });
+
+  it("wraps database token tables to fit narrow terminals", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+
+    const program = buildTestProgram({
+      terminalColumns: 58,
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      databaseAssetSelect: async () => [
+        {
+          id: "database-1",
+          name: "海外-DB-直播业务库-节后-二期(cynosdbmysql-ins-p0c5r392)",
+          address: "10.40.45.158",
+          protocols: [{ name: "mysql", port: 3306 }]
+        }
+      ],
+      fetcher: (async (input, init) => {
+        const path = new URL(String(input)).pathname;
+        if (path === "/api/v1/accounts/accounts/username-suggestions/") {
+          return jsonResponse(["stream-user"], 201);
+        }
+        if (path === "/api/v1/users/connection-token/") {
+          return jsonResponse({
+            id: "connection-token-main",
+            value: "long-password-for-wrapping",
+            date_expired: "2026/09/20 14:47:23 +0800"
+          }, 201);
+        }
+        if (path === "/api/v1/users/connection-token/connection-token-main/client-url/") {
+          return jsonResponse({
+            url: jmsUrl({
+              id: "fe30d02b-234d-4b64-b05c-bc603f61e43b",
+              value: "long-password-for-wrapping",
+              token: { id: "fe30d02b-234d-4b64-b05c-bc603f61e43b", value: "long-password-for-wrapping" },
+              endpoint: { host: "jumpserver.narrow-screen.example.test", port: 33061 }
+            })
+          });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${path}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "databases",
+        "token",
+        "直播业务库"
+      ],
+      { from: "node" }
+    );
+
+    const output = stdout.join("");
+
+    expect(stderr).toEqual([]);
+    expect(output).toContain("│ 连接命令行");
+    expect(output).not.toContain("\n连接命令行\n");
+    for (const line of output.trimEnd().split("\n")) {
+      expect(displayWidthForTest(line), line).toBeLessThanOrEqual(58);
+    }
+  });
+
+  it("enables reusable database tokens with --reusable", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    let tokenCreateBody: string | undefined;
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      databaseAssetSelect: async () => [
+        {
+          id: "database-1",
+          name: "prod-main-db",
+          address: "10.0.0.10",
+          protocols: [{ name: "mysql", port: 3306 }]
+        }
+      ],
+      fetcher: (async (input, init) => {
+        const path = new URL(String(input)).pathname;
+        if (path === "/api/v1/accounts/accounts/username-suggestions/") {
+          return jsonResponse(["main-user"], 201);
+        }
+        if (path === "/api/v1/users/connection-token/") {
+          tokenCreateBody = typeof init?.body === "string" ? init.body : undefined;
+          return jsonResponse({ id: "connection-token-main", value: "main-password" }, 201);
+        }
+        if (path === "/api/v1/users/connection-token/connection-token-main/client-url/") {
+          return jsonResponse({
+            url: jmsUrl({
+              id: "connection-token-main",
+              value: "main-password",
+              token: { id: "connection-token-main", value: "main-password" },
+              endpoint: { host: "jumpserver.example.test", port: 33061 }
+            })
+          });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${path}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "databases",
+        "token",
+        "prod-main",
+        "--reusable"
+      ],
+      { from: "node" }
+    );
+
+    expect(stderr).toEqual([]);
+    expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
+      connect_options: {
+        reusable: true
+      }
+    });
+    expect(stdout.join("")).toContain("│ 开启复用");
+    expect(stdout.join("")).toContain("是");
+  });
+
+  it("can confirm reusable database tokens interactively when no reusable flag is passed", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const confirmations: Array<{ message: string; initialValue: boolean | undefined }> = [];
+    let tokenCreateBody: string | undefined;
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      confirm: async (message, initialValue) => {
+        confirmations.push({ message, initialValue });
+        return true;
+      },
+      databaseAssetSelect: async () => [
+        {
+          id: "database-1",
+          name: "prod-main-db",
+          address: "10.0.0.10",
+          protocols: [{ name: "mysql", port: 3306 }]
+        }
+      ],
+      fetcher: (async (input, init) => {
+        const path = new URL(String(input)).pathname;
+        if (path === "/api/v1/accounts/accounts/username-suggestions/") {
+          return jsonResponse(["main-user"], 201);
+        }
+        if (path === "/api/v1/users/connection-token/") {
+          tokenCreateBody = typeof init?.body === "string" ? init.body : undefined;
+          return jsonResponse({ id: "connection-token-main", value: "main-password" }, 201);
+        }
+        if (path === "/api/v1/users/connection-token/connection-token-main/client-url/") {
+          return jsonResponse({
+            url: jmsUrl({
+              id: "connection-token-main",
+              value: "main-password",
+              token: { id: "connection-token-main", value: "main-password" },
+              endpoint: { host: "jumpserver.example.test", port: 33061 }
+            })
+          });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${path}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "databases",
+        "token",
+        "prod-main"
+      ],
+      { from: "node" }
+    );
+
+    expect(stderr).toEqual([]);
+    expect(confirmations).toEqual([{ message: "是否开启复用", initialValue: false }]);
+    expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
+      connect_options: {
+        reusable: true
+      }
+    });
+    expect(stdout.join("")).toContain("│ 开启复用");
+    expect(stdout.join("")).toContain("是");
+  });
+
+  it("prints only DSN lines for selected database tokens with --dsn", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const selectedAssets = [
+      {
+        id: "database-1",
+        name: "prod-main-db",
+        address: "10.0.0.10",
+        protocols: [{ name: "mysql", port: 3306 }]
+      },
+      {
+        id: "database-2",
+        name: "prod-report-db",
+        address: "10.0.0.11",
+        protocols: [{ name: "mysql", port: 3306 }]
+      }
+    ];
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      databaseAssetSelect: async () => selectedAssets,
+      fetcher: (async (input, init) => {
+        const path = new URL(String(input)).pathname;
+        if (path === "/api/v1/perms/users/self/assets/") {
+          return jsonResponse({ count: selectedAssets.length, results: selectedAssets });
+        }
+        if (path === "/api/v1/accounts/accounts/username-suggestions/") {
+          const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { assets?: string[] };
+          return jsonResponse([body.assets?.[0] === "database-1" ? "main-user" : "report-user"], 201);
+        }
+        if (path === "/api/v1/users/connection-token/") {
+          const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { asset?: string };
+          const suffix = body.asset === "database-1" ? "main" : "report";
+          return jsonResponse({ id: `connection-token-${suffix}`, value: `${suffix}-password` }, 201);
+        }
+        if (path === "/api/v1/users/connection-token/connection-token-main/client-url/") {
+          return jsonResponse({
+            url: jmsUrl({
+              id: "connection-token-main",
+              value: "main-password",
+              token: { id: "connection-token-main", value: "main-password" },
+              endpoint: { host: "jumpserver.example.test", port: 33061 }
+            })
+          });
+        }
+        if (path === "/api/v1/users/connection-token/connection-token-report/client-url/") {
+          return jsonResponse({
+            url: jmsUrl({
+              id: "connection-token-report",
+              value: "report-password",
+              token: { id: "connection-token-report", value: "report-password" },
+              endpoint: { host: "jumpserver.example.test", port: 33062 }
+            })
+          });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${path}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "databases",
+        "token",
+        "prod-*",
+        "--dsn"
+      ],
+      { from: "node" }
+    );
+
+    expect(stderr).toEqual([]);
+    expect(stdout.join("")).toBe(
+      [
+        "mysql://connection-token-main:main-password@jumpserver.example.test:33061/",
+        "mysql://connection-token-report:report-password@jumpserver.example.test:33062/",
+        ""
+      ].join("\n")
+    );
+    expect(stdout.join("")).not.toContain("asset_id");
+    expect(stdout.join("")).not.toContain("jms://");
+  });
+
+  it("prints the raw jms URL for database tokens only when requested", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      fetcher: (async (input) => {
+        const path = new URL(String(input)).pathname;
+        if (path === "/api/v1/perms/users/self/assets/") {
+          return jsonResponse({
+            count: 1,
+            results: [
+              {
+                id: "database-1",
+                name: "prod-main-db",
+                address: "10.0.0.10",
+                protocols: [{ name: "mysql", port: 3306 }]
+              }
+            ]
+          });
+        }
+        if (path === "/api/v1/accounts/accounts/username-suggestions/") {
+          return jsonResponse(["prod-user"], 201);
+        }
+        if (path === "/api/v1/users/connection-token/") {
+          return jsonResponse({ id: "connection-token-raw", value: "raw-password" }, 201);
+        }
+        if (path === "/api/v1/users/connection-token/connection-token-raw/client-url/") {
+          return jsonResponse({ url: "jms://raw-client-url" });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${path}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "databases",
+        "token",
+        "prod-main",
+        "--jms-url"
+      ],
+      { from: "node" }
+    );
+
+    const output = stdout.join("");
+    expect(stderr).toEqual([]);
+    expect(output).toContain("JMS 连接地址");
+    expect(output).toContain("jms://raw-client-url");
+  });
+
+  it("submits terminal database multi-select without a confirmation prompt", async () => {
+    const source = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
+
+    expect(source).toContain("clackMultiselect<DatabaseAsset | DatabaseAssetNavigationChoice>");
+    expect(source).not.toContain("完成选择");
+    expect(source).not.toContain('message: "下一步"');
+  });
+
+  it("clears submitted terminal prompt display before printing database token data", async () => {
+    const source = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
+
+    expect(source).toContain("clearSubmittedPromptDisplay(processStderr");
+    expect(source).toMatch(/selectDatabaseAssetsWithClack[\s\S]+clearSubmittedPromptDisplay\(processStderr/);
+    expect(source).toMatch(/confirmFromTerminal[\s\S]+clearSubmittedPromptDisplay\(processStderr/);
+  });
+
+  it("uses keyboard-style selection when the token command matches multiple assets or usernames", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const selections: Array<{ message: string; labels: string[] }> = [];
+    let tokenCreateBody: string | undefined;
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      prompt: async () => {
+        throw new Error("numeric prompt should not be used for list selection");
+      },
+      select: async (message, choices) => {
+        selections.push({
+          message,
+          labels: choices.map((choice) => choice.label)
+        });
+        return choices[1]!.value;
+      },
+      fetcher: (async (input, init) => {
+        const path = new URL(String(input)).pathname;
+        if (path === "/api/v1/perms/users/self/assets/") {
+          return jsonResponse({
+            count: 2,
+            results: [
+              {
+                id: "database-1",
+                name: "prod-main-db",
+                address: "10.0.0.10",
+                protocols: [{ name: "mysql", port: 3306 }]
+              },
+              {
+                id: "database-2",
+                name: "prod-report-db",
+                address: "10.0.0.11",
+                protocols: [{ name: "mysql", port: 3306 }]
+              }
+            ]
+          });
+        }
+        if (path === "/api/v1/accounts/accounts/username-suggestions/") {
+          return jsonResponse(["report-reader", "report-account"], 201);
+        }
+        if (path === "/api/v1/users/connection-token/") {
+          tokenCreateBody = typeof init?.body === "string" ? init.body : undefined;
+          return jsonResponse({ id: "connection-token-2", date_expired: "2026-06-12T10:00:00+08:00" }, 201);
+        }
+        if (path === "/api/v1/users/connection-token/connection-token-2/client-url/") {
+          return jsonResponse({ url: "jms://connect/report" });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${path}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "databases",
+        "token",
+        "prod-*"
+      ],
+      { from: "node" }
+    );
+
+    expect(stderr).toEqual([]);
+    expect(selections).toEqual([
+      {
+        message: "匹配到多个数据库实例",
+        labels: ["prod-main-db (10.0.0.10)", "prod-report-db (10.0.0.11)"]
+      },
+      {
+        message: "请选择数据库用户名",
+        labels: ["report-reader", "report-account"]
+      }
+    ]);
+    expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
+      asset: "database-2",
+      account: "prod-report-db-账号",
+      input_username: "report-account"
+    });
+  });
+
+  it("loads more database asset pages from the token selector", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const assetRequestUrls: string[] = [];
+    const selections: Array<{ message: string; labels: string[] }> = [];
+    let tokenCreateBody: string | undefined;
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      select: async (message, choices) => {
+        selections.push({
+          message,
+          labels: choices.map((choice) => choice.label)
+        });
+        return choices.find((choice) => choice.label.startsWith("加载更多"))?.value ?? choices.at(-1)!.value;
+      },
+      fetcher: (async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/api/v1/perms/users/self/assets/") {
+          assetRequestUrls.push(url.href);
+          const offset = url.searchParams.get("offset") ?? "0";
+          if (offset === "0") {
+            return jsonResponse({
+              count: 3,
+              results: [
+                {
+                  id: "database-1",
+                  name: "prod-main-db",
+                  address: "10.0.0.10",
+                  protocols: [{ name: "mysql", port: 3306 }]
+                },
+                {
+                  id: "database-2",
+                  name: "prod-report-db",
+                  address: "10.0.0.11",
+                  protocols: [{ name: "mysql", port: 3306 }]
+                }
+              ]
+            });
+          }
+          return jsonResponse({
+            count: 3,
+            results: [
+              {
+                id: "database-3",
+                name: "prod-audit-db",
+                address: "10.0.0.12",
+                protocols: [{ name: "mysql", port: 3306 }]
+              }
+            ]
+          });
+        }
+        if (url.pathname === "/api/v1/accounts/accounts/username-suggestions/") {
+          return jsonResponse(["audit-account"], 201);
+        }
+        if (url.pathname === "/api/v1/users/connection-token/") {
+          tokenCreateBody = typeof init?.body === "string" ? init.body : undefined;
+          return jsonResponse({ id: "connection-token-3", date_expired: "2026-06-12T10:00:00+08:00" }, 201);
+        }
+        if (url.pathname === "/api/v1/users/connection-token/connection-token-3/client-url/") {
+          return jsonResponse({ url: "jms://connect/audit" });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${url.pathname}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "databases",
+        "token",
+        "prod-*",
+        "--limit",
+        "2"
+      ],
+      { from: "node" }
+    );
+
+    expect(stderr).toEqual([]);
+    expect(assetRequestUrls).toEqual([
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=prod-&limit=2",
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=prod-&limit=2&offset=2"
+    ]);
+    expect(selections).toEqual([
+      {
+        message: "匹配到多个数据库实例",
+        labels: [
+          "prod-main-db (10.0.0.10)",
+          "prod-report-db (10.0.0.11)",
+          "加载更多...（已加载 2/3）"
+        ]
+      },
+      {
+        message: "匹配到多个数据库实例",
+        labels: [
+          "prod-main-db (10.0.0.10)",
+          "prod-report-db (10.0.0.11)",
+          "prod-audit-db (10.0.0.12)"
+        ]
+      }
+    ]);
+    expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
+      asset: "database-3",
+      account: "prod-audit-db-账号",
+      input_username: "audit-account"
+    });
+    expect(stdout.join("")).toContain("│ 名称");
+    expect(stdout.join("")).not.toContain("数据库 连接信息");
+  });
+
+  it("loads database token assets from the current user's permitted database assets", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const assetRequestUrls: string[] = [];
+    let tokenCreateBody: string | undefined;
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      select: async (_message, choices) => choices[0]!.value,
+      fetcher: (async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/api/v1/perms/users/self/assets/") {
+          assetRequestUrls.push(url.href);
+          return jsonResponse({
+            count: 40,
+            next: "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&limit=10&offset=10",
+            results: [
+              {
+                id: "database-1",
+                name: "permed-main-db",
+                address: "10.0.0.10",
+                category: { value: "database", label: "数据库" },
+                protocols: [{ name: "mysql", port: 3306 }]
+              }
+            ]
+          });
+        }
+        if (url.pathname === "/api/v1/accounts/accounts/username-suggestions/") {
+          return jsonResponse(["permed-account"], 201);
+        }
+        if (url.pathname === "/api/v1/users/connection-token/") {
+          tokenCreateBody = typeof init?.body === "string" ? init.body : undefined;
+          return jsonResponse({ id: "connection-token-permed", date_expired: "2026-06-12T10:00:00+08:00" }, 201);
+        }
+        if (url.pathname === "/api/v1/users/connection-token/connection-token-permed/client-url/") {
+          return jsonResponse({ url: "jms://connect/permed" });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${url.pathname}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "databases",
+        "token",
+        "permed",
+        "--limit",
+        "10"
+      ],
+      { from: "node" }
+    );
+
+    expect(stderr).toEqual([]);
+    expect(assetRequestUrls).toEqual([
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=permed&limit=10"
+    ]);
+    expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
+      asset: "database-1",
+      input_username: "permed-account"
+    });
+    expect(stdout.join("")).toContain("│ 名称");
+    expect(stdout.join("")).not.toContain("数据库 连接信息");
+  });
+
+  it("lets the database asset selector search and request later pages", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const assetRequestUrls: string[] = [];
+    let tokenCreateBody: string | undefined;
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      select: async () => {
+        throw new Error("generic select should not choose database assets");
+      },
+      databaseAssetSelect: async (_message, input) => {
+        await input.fetchPage(input.initialSearch, 0);
+        await input.fetchPage("billing", 0);
+        const selectedPage = await input.fetchPage("billing", 20);
+        return [selectedPage.items[0]!];
+      },
+      fetcher: (async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/api/v1/perms/users/self/assets/") {
+          assetRequestUrls.push(url.href);
+          const search = url.searchParams.get("search");
+          const offset = url.searchParams.get("offset") ?? "0";
+          return jsonResponse({
+            count: 40,
+            next:
+              offset === "0"
+                ? "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=billing&limit=20&offset=20"
+                : null,
+            results: [
+              {
+                id: search === "billing" && offset === "20" ? "database-billing-page-2" : "database-first-page",
+                name: search === "billing" && offset === "20" ? "billing-page-2-db" : "first-page-db",
+                address: "10.0.0.20",
+                protocols: [{ name: "mysql", port: 3306 }]
+              }
+            ]
+          });
+        }
+        if (url.pathname === "/api/v1/accounts/accounts/username-suggestions/") {
+          return jsonResponse(["billing-account"], 201);
+        }
+        if (url.pathname === "/api/v1/users/connection-token/") {
+          tokenCreateBody = typeof init?.body === "string" ? init.body : undefined;
+          return jsonResponse({ id: "connection-token-search", date_expired: "2026-06-12T10:00:00+08:00" }, 201);
+        }
+        if (url.pathname === "/api/v1/users/connection-token/connection-token-search/client-url/") {
+          return jsonResponse({ url: "jms://connect/search" });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${url.pathname}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "databases",
+        "token",
+        "prod"
+      ],
+      { from: "node" }
+    );
+
+    expect(stderr).toEqual([]);
+    expect(assetRequestUrls).toEqual([
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=prod&limit=20",
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=billing&limit=20",
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=billing&limit=20&offset=20"
+    ]);
+    expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
+      asset: "database-billing-page-2",
+      input_username: "billing-account"
+    });
+    expect(stdout.join("")).toContain("│ 名称");
+    expect(stdout.join("")).not.toContain("数据库 连接信息");
+  });
+
+  it("offers to load another database asset page when a full page has no reliable total", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const assetRequestUrls: string[] = [];
+    const selections: Array<{ message: string; labels: string[] }> = [];
+    let tokenCreateBody: string | undefined;
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      select: async (message, choices) => {
+        selections.push({
+          message,
+          labels: choices.map((choice) => choice.label)
+        });
+        return choices.find((choice) => choice.label.startsWith("加载更多"))?.value ?? choices.at(-1)!.value;
+      },
+      fetcher: (async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/api/v1/perms/users/self/assets/") {
+          assetRequestUrls.push(url.href);
+          const offset = url.searchParams.get("offset") ?? "0";
+          if (offset === "0") {
+            return jsonResponse({
+              count: 2,
+              next: null,
+              results: [
+                {
+                  id: "database-1",
+                  name: "prod-main-db",
+                  address: "10.0.0.10",
+                  protocols: [{ name: "mysql", port: 3306 }]
+                },
+                {
+                  id: "database-2",
+                  name: "prod-report-db",
+                  address: "10.0.0.11",
+                  protocols: [{ name: "mysql", port: 3306 }]
+                }
+              ]
+            });
+          }
+          return jsonResponse({
+            count: 1,
+            next: null,
+            results: [
+              {
+                id: "database-3",
+                name: "prod-audit-db",
+                address: "10.0.0.12",
+                protocols: [{ name: "mysql", port: 3306 }]
+              }
+            ]
+          });
+        }
+        if (url.pathname === "/api/v1/accounts/accounts/username-suggestions/") {
+          return jsonResponse(["audit-account"], 201);
+        }
+        if (url.pathname === "/api/v1/users/connection-token/") {
+          tokenCreateBody = typeof init?.body === "string" ? init.body : undefined;
+          return jsonResponse({ id: "connection-token-4", date_expired: "2026-06-12T10:00:00+08:00" }, 201);
+        }
+        if (url.pathname === "/api/v1/users/connection-token/connection-token-4/client-url/") {
+          return jsonResponse({ url: "jms://connect/audit" });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${url.pathname}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "databases",
+        "token",
+        "prod-*",
+        "--limit",
+        "2"
+      ],
+      { from: "node" }
+    );
+
+    expect(stderr).toEqual([]);
+    expect(assetRequestUrls).toEqual([
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=prod-&limit=2",
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=prod-&limit=2&offset=2"
+    ]);
+    expect(selections[0]?.labels).toEqual([
+      "prod-main-db (10.0.0.10)",
+      "prod-report-db (10.0.0.11)",
+      "加载更多...（已加载 2）"
+    ]);
+    expect(selections.at(-1)?.labels).toEqual([
+      "prod-main-db (10.0.0.10)",
+      "prod-report-db (10.0.0.11)",
+      "prod-audit-db (10.0.0.12)"
+    ]);
+    expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
+      asset: "database-3",
+      input_username: "audit-account"
+    });
+    expect(stdout.join("")).toContain("│ 名称");
+    expect(stdout.join("")).not.toContain("数据库 连接信息");
+  });
+
+  it("loads more after the server caps permitted database assets below the requested limit", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const assetRequestUrls: string[] = [];
+    const selections: Array<{ message: string; labels: string[] }> = [];
+    let tokenCreateBody: string | undefined;
+
+    const firstPageAssets = Array.from({ length: 10 }, (_, index) => ({
+      id: `database-${index + 1}`,
+      name: `prod-db-${index + 1}`,
+      address: `10.0.0.${index + 1}`,
+      protocols: [{ name: "mysql", port: 3306 }]
+    }));
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      select: async (message, choices) => {
+        selections.push({
+          message,
+          labels: choices.map((choice) => choice.label)
+        });
+        return choices.find((choice) => choice.label.startsWith("加载更多"))?.value ?? choices.at(-1)!.value;
+      },
+      fetcher: (async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/api/v1/perms/users/self/assets/") {
+          assetRequestUrls.push(url.href);
+          const offset = url.searchParams.get("offset") ?? "0";
+          return jsonResponse({
+            count: 40,
+            next:
+              offset === "0"
+                ? "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&limit=20&offset=10"
+                : null,
+            results: offset === "0" ? firstPageAssets : []
+          });
+        }
+        if (url.pathname === "/api/v1/accounts/accounts/username-suggestions/") {
+          return jsonResponse(["capped-account"], 201);
+        }
+        if (url.pathname === "/api/v1/users/connection-token/") {
+          tokenCreateBody = typeof init?.body === "string" ? init.body : undefined;
+          return jsonResponse({ id: "connection-token-5", date_expired: "2026-06-12T10:00:00+08:00" }, 201);
+        }
+        if (url.pathname === "/api/v1/users/connection-token/connection-token-5/client-url/") {
+          return jsonResponse({ url: "jms://connect/capped" });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${url.pathname}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "databases",
+        "token"
+      ],
+      { from: "node" }
+    );
+
+    expect(stderr).toEqual([]);
+    expect(assetRequestUrls).toEqual([
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&limit=20",
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&limit=20&offset=10"
+    ]);
+    expect(selections[0]?.labels.at(-1)).toBe("加载更多...（已加载 10/40）");
+    expect(selections.at(-1)?.labels).not.toContain("加载更多...（已加载 10/40）");
+    expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
+      asset: "database-10",
+      input_username: "capped-account"
+    });
+    expect(stdout.join("")).toContain("│ 名称");
+    expect(stdout.join("")).not.toContain("数据库 连接信息");
   });
 
   it("prints a human-friendly dry-run request plan for an operation command", async () => {
@@ -999,4 +2253,35 @@ function findOperationForTest(operations: ReturnType<typeof loadOperations>, ope
   const operation = operations.find((candidate) => candidate.operationId === operationId);
   expect(operation).toBeTruthy();
   return operation!;
+}
+
+function jsonResponse(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "content-type": "application/json" }
+  });
+}
+
+function jmsUrl(payload: unknown): string {
+  return `jms://${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}`;
+}
+
+function displayWidthForTest(value: string): number {
+  let width = 0;
+  for (const char of value) {
+    const codePoint = char.codePointAt(0) ?? 0;
+    width += (
+      (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+      (codePoint >= 0x2e80 && codePoint <= 0xa4cf) ||
+      (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+      (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+      (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+      (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+      (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+      (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+    )
+      ? 2
+      : 1;
+  }
+  return width;
 }

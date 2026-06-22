@@ -3,6 +3,7 @@
   "version": "0.1.1",
   "description": "OpenAPI-driven CLI for JumpServer.",
   "type": "module",
+  "license": "MIT",
   "keywords": [
     "jumpserver",
     "cli",
@@ -22,10 +23,13 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "LICENSE",
+    "README.md",
+    "skills"
   ],
   "scripts": {
-    "build": "tsgo -p tsconfig.build.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsgo -p tsconfig.build.json",
     "test": "vitest run",
     "typecheck": "tsgo -p tsconfig.json --noEmit",
     "generate:operations": "tsx scripts/generate-operations.ts",
@@ -41,11 +45,12 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@clack/prompts": "^1.5.1",
     "commander": "15.0.0"
   },
   "devDependencies": {
-    "@typescript/native-preview": "beta",
     "@types/node": "25.9.2",
+    "@typescript/native-preview": "beta",
     "tsx": "4.22.4",
     "vitest": "4.1.8"
   }

@@ -2,6 +2,8 @@
 
 OpenAPI-driven CLI for JumpServer.
 
+> Development status: this project is still under active development. Command names, output formats, and packaged skills may change before a stable release.
+
 ## Requirements
 
 - Node.js 22 or newer
@@ -9,11 +11,35 @@ OpenAPI-driven CLI for JumpServer.
 
 ## Installation
 
-After the package is published to npm:
+Install the latest release from npm:
 
 ```bash
 npm install -g jumpserver-cli
 jms --help
+```
+
+## Agent Skills
+
+Reusable agent skills are published in this repository under `skills/<skill-name>/SKILL.md`.
+
+Install all project skills:
+
+```bash
+npx skills add elricli/jumpserver-cli --skill '*'
+```
+
+Install individual skills:
+
+```bash
+npx skills add elricli/jumpserver-cli --skill jumpserver-cli-auth
+npx skills add elricli/jumpserver-cli --skill jumpserver-cli-api
+npx skills add elricli/jumpserver-cli --skill jumpserver-cli-database-token
+```
+
+For local development, install from the working tree:
+
+```bash
+npx skills add ./skills --skill '*'
 ```
 
 ## Authentication
@@ -130,22 +156,18 @@ cat "$JMS_CONFIG"
 
 ## Publishing
 
-Before the first public release, choose a license and add it to `package.json` and a `LICENSE` file if the package should be open source.
+This repository publishes to npm from `.github/workflows/npm-publish.yml`. The workflow can run from a GitHub Release or be triggered manually from GitHub Actions.
 
-This repository publishes to npm from the GitHub Release workflow in `.github/workflows/npm-publish.yml`. Configure the repository secret first:
+Required repository secret:
 
-1. Create an npm automation token from the npm account that owns the package.
-2. Add it to GitHub repository secrets as `NPM_TOKEN`.
-3. Create a GitHub Release whose tag matches `package.json` version, for example `v0.1.0`.
+- `NPM_TOKEN`: npm automation token from the npm account that owns the package.
 
 ```bash
-npm login
-npm whoami
-npm view jumpserver-cli name version # Expected to return 404 before the first publish.
 npm run verify
 npm pack --dry-run
+npm view jumpserver-cli version dist-tags
 ```
 
-`prepublishOnly` runs `npm run verify` before a real publish, and `prepack` builds `dist` before the tarball is created. Use `npm version patch`, `npm version minor`, or `npm version major` before publishing subsequent releases, then push the generated tag and publish a GitHub Release for that tag. Prereleases are published with the npm `next` dist-tag; normal releases use `latest`.
+`prepublishOnly` runs `npm run verify` before a real publish, and `prepack` builds `dist` before the tarball is created. The build clears `dist` first and does not generate JavaScript sourcemaps, so published packages contain runtime JavaScript, declarations, `README.md`, and `LICENSE` without `.map` files.
 
-The workflow can also be run manually from GitHub Actions by choosing a tag such as `v0.1.0` and an npm dist-tag (`latest` or `next`).
+Use `npm version patch`, `npm version minor`, or `npm version major` before publishing, then push the generated tag. The workflow can be run manually by choosing that tag, for example `v0.1.1`, and an npm dist-tag (`latest` or `next`). Prerelease GitHub Releases publish with `next`; normal releases publish with `latest`.
