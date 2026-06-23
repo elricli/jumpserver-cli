@@ -10,6 +10,7 @@ import {
   text as clackText
 } from "@clack/prompts";
 import { Buffer } from "node:buffer";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { readFileSync, realpathSync } from "node:fs";
@@ -33,6 +34,7 @@ import { createRequestPlan, type QueryValue, type RequestPlan } from "./request.
 type Fetcher = typeof fetch;
 export type Prompt = (message: string, options?: { secret?: boolean }) => Promise<string>;
 export type ConfirmPrompt = (message: string, initialValue?: boolean) => Promise<boolean>;
+export type UpgradeRunner = (command: string, args: string[]) => Promise<number>;
 export interface SelectChoice<T> {
   label: string;
   value: T;
@@ -56,6 +58,7 @@ export interface BuildProgramOptions {
   confirm?: ConfirmPrompt;
   select?: SelectPrompt;
   databaseAssetSelect?: DatabaseAssetSelectPrompt;
+  upgradeRunner?: UpgradeRunner;
   configPath?: string;
   env?: NodeJS.ProcessEnv;
 }
@@ -262,6 +265,7 @@ export function buildProgram(options: BuildProgramOptions = {}): Command {
   const databaseAssetSelect =
     options.databaseAssetSelect ??
     (stdin.isTTY && !options.select ? selectDatabaseAssetFromTerminal : databaseAssetSelectFromChoicePrompt(select));
+  const upgradeRunner = options.upgradeRunner ?? runUpgradeProcess;
   const env = options.env ?? process.env;
   const configPath = resolveConfigPath(options.configPath, env);
   const config = loadConfig(configPath);
@@ -278,7 +282,8 @@ export function buildProgram(options: BuildProgramOptions = {}): Command {
     canConfirmDatabaseReusable: options.confirm !== undefined || stdin.isTTY,
     configPath,
     config,
-    env
+    env,
+    upgradeRunner
   };
 
   const program = new Command();
@@ -297,6 +302,20 @@ export function buildProgram(options: BuildProgramOptions = {}): Command {
     .option("--token <token>", "Bearer token")
     .option("--private-token <token>", "Private token")
     .option("--org <id>", "JumpServer organization id");
+
+  program
+    .command("version")
+    .description("Print the CLI version")
+    .action(() => {
+      stdout(`${readPackageVersion()}\n`);
+    });
+
+  program
+    .command("upgrade")
+    .description("Upgrade jumpserver-cli to the latest npm release")
+    .action(async () => {
+      await runUpgradeCommand(context);
+    });
 
   const apiCommand = program
     .command("api")
@@ -372,6 +391,44 @@ export function buildProgram(options: BuildProgramOptions = {}): Command {
   registerOperationCommands(program, operations, context);
 
   return program;
+}
+
+async function runUpgradeCommand(context: RunContext): Promise<void> {
+  const command = npmCommand();
+  const args = ["install", "-g", "jumpserver-cli@latest"];
+  context.stdout("正在升级 jumpserver-cli 到最新版本...\n");
+
+  let exitCode: number;
+  try {
+    exitCode = await context.upgradeRunner(command, args);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    context.stderr(`升级失败: ${message}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (exitCode !== 0) {
+    context.stderr(`升级失败: npm install exited with code ${exitCode}\n`);
+    process.exitCode = exitCode;
+    return;
+  }
+
+  context.stdout("升级完成\n");
+}
+
+function npmCommand(): string {
+  return process.platform === "win32" ? "npm.cmd" : "npm";
+}
+
+function runUpgradeProcess(command: string, args: string[]): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: "inherit" });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      resolve(code ?? 1);
+    });
+  });
 }
 
 function registerOperationCommands(parent: Command, operations: ApiOperation[], context: RunContext): void {
@@ -556,6 +613,7 @@ interface RunContext {
   configPath: string;
   config: CliConfig;
   env: NodeJS.ProcessEnv;
+  upgradeRunner: UpgradeRunner;
 }
 
 interface InteractiveRunContext extends RunContext {
@@ -868,12 +926,30 @@ async function choosePaginatedDatabaseAssets(
   context: InteractiveRunContext
 ): Promise<DatabaseAsset[]> {
   const initialSearch = searchTextFromGlob(pattern);
+  const pageCache = new Map<string, DatabaseAssetPage>();
+  const fetchPage: DatabaseAssetSelectionInput["fetchPage"] = async (search, offset) => {
+    const cacheKey = `${search ?? ""}\0${offset}`;
+    const cachedPage = pageCache.get(cacheKey);
+    if (cachedPage) {
+      return cachedPage;
+    }
+    const page = await fetchDatabaseAssetsPage(search, limit, offset, command, context);
+    pageCache.set(cacheKey, page);
+    return page;
+  };
+  if (initialSearch) {
+    const firstPage = await fetchPage(initialSearch, 0);
+    if (firstPage.items.length === 1 && !firstPage.hasMore) {
+      return [firstPage.items[0]!];
+    }
+  }
+
   return context.databaseAssetSelect(
     pattern ? "匹配到多个数据库实例" : "请选择数据库实例",
     {
       ...(initialSearch ? { initialSearch } : {}),
       pageSize: limit,
-      fetchPage: (search, offset) => fetchDatabaseAssetsPage(search, limit, offset, command, context)
+      fetchPage
     }
   );
 }

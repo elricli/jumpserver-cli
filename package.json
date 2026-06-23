@@ -53,5 +53,9 @@
     "@typescript/native-preview": "beta",
     "tsx": "4.22.4",
     "vitest": "4.1.8"
+  },
+  "allowScripts": {
+    "esbuild@0.28.0": true,
+    "fsevents@2.3.3": true
   }
 }

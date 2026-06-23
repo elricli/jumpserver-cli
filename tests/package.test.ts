@@ -40,6 +40,25 @@ describe("package hygiene", () => {
     expect(packageLock.packages?.["node_modules/@clack/prompts"]).toBeTruthy();
   });
 
+  it("does not depend on its own published package", () => {
+    const packageJson = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8")) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+      optionalDependencies?: Record<string, string>;
+      peerDependencies?: Record<string, string>;
+    };
+    const packageLock = JSON.parse(readFileSync(resolve(ROOT, "package-lock.json"), "utf8")) as {
+      packages?: Record<string, { dependencies?: Record<string, string> }>;
+    };
+
+    expect(packageJson.dependencies?.["jumpserver-cli"]).toBeUndefined();
+    expect(packageJson.devDependencies?.["jumpserver-cli"]).toBeUndefined();
+    expect(packageJson.optionalDependencies?.["jumpserver-cli"]).toBeUndefined();
+    expect(packageJson.peerDependencies?.["jumpserver-cli"]).toBeUndefined();
+    expect(packageLock.packages?.[""]?.dependencies?.["jumpserver-cli"]).toBeUndefined();
+    expect(packageLock.packages?.["node_modules/jumpserver-cli"]).toBeUndefined();
+  });
+
   it("does not track or publish the raw OpenAPI document", () => {
     const packageJson = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8")) as {
       files?: string[];

@@ -80,6 +80,63 @@ describe("CLI command surface", () => {
     }
   });
 
+  it("prints the package version with the version subcommand", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value)
+    });
+    program.exitOverride();
+
+    await program.parseAsync(["node", "jms", "version"], { from: "node" });
+
+    expect(stderr).toEqual([]);
+    expect(stdout.join("")).toBe(`${readPackageVersion()}\n`);
+  });
+
+  it("upgrades the current CLI package with npm", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const runs: Array<{ command: string; args: string[] }> = [];
+    const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      upgradeRunner: async (command, args) => {
+        runs.push({ command, args });
+        return 0;
+      }
+    });
+    program.exitOverride();
+
+    await program.parseAsync(["node", "jms", "upgrade"], { from: "node" });
+
+    expect(stderr).toEqual([]);
+    expect(stdout).toEqual(["正在升级 jumpserver-cli 到最新版本...\n", "升级完成\n"]);
+    expect(runs).toEqual([{ command: npmCommand, args: ["install", "-g", "jumpserver-cli@latest"] }]);
+  });
+
+  it("reports self-upgrade failures without hiding the npm exit code", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const previousExitCode = process.exitCode;
+    process.exitCode = undefined;
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      upgradeRunner: async () => 7
+    });
+    program.exitOverride();
+
+    await program.parseAsync(["node", "jms", "upgrade"], { from: "node" });
+
+    expect(stdout).toEqual(["正在升级 jumpserver-cli 到最新版本...\n"]);
+    expect(stderr.join("")).toBe("升级失败: npm install exited with code 7\n");
+    expect(process.exitCode).toBe(7);
+    process.exitCode = previousExitCode;
+  });
+
   it("treats symlinked npm bin paths as direct CLI invocation", async () => {
     const directory = await mkdtemp(join(tmpdir(), "jms-cli-bin-"));
     const target = join(directory, "cli.js");
@@ -556,21 +613,23 @@ describe("CLI command surface", () => {
   it("wraps database token tables to fit narrow terminals", async () => {
     const stdout: string[] = [];
     const stderr: string[] = [];
+    const selectedAsset = {
+      id: "database-1",
+      name: "海外-DB-直播业务库-节后-二期(cynosdbmysql-ins-p0c5r392)",
+      address: "10.40.45.158",
+      protocols: [{ name: "mysql", port: 3306 }]
+    };
 
     const program = buildTestProgram({
       terminalColumns: 58,
       stdout: (value) => stdout.push(value),
       stderr: (value) => stderr.push(value),
-      databaseAssetSelect: async () => [
-        {
-          id: "database-1",
-          name: "海外-DB-直播业务库-节后-二期(cynosdbmysql-ins-p0c5r392)",
-          address: "10.40.45.158",
-          protocols: [{ name: "mysql", port: 3306 }]
-        }
-      ],
+      databaseAssetSelect: async () => [selectedAsset],
       fetcher: (async (input, init) => {
         const path = new URL(String(input)).pathname;
+        if (path === "/api/v1/perms/users/self/assets/") {
+          return jsonResponse({ count: 1, next: null, results: [selectedAsset] });
+        }
         if (path === "/api/v1/accounts/accounts/username-suggestions/") {
           return jsonResponse(["stream-user"], 201);
         }
@@ -625,20 +684,22 @@ describe("CLI command surface", () => {
     const stdout: string[] = [];
     const stderr: string[] = [];
     let tokenCreateBody: string | undefined;
+    const selectedAsset = {
+      id: "database-1",
+      name: "prod-main-db",
+      address: "10.0.0.10",
+      protocols: [{ name: "mysql", port: 3306 }]
+    };
 
     const program = buildTestProgram({
       stdout: (value) => stdout.push(value),
       stderr: (value) => stderr.push(value),
-      databaseAssetSelect: async () => [
-        {
-          id: "database-1",
-          name: "prod-main-db",
-          address: "10.0.0.10",
-          protocols: [{ name: "mysql", port: 3306 }]
-        }
-      ],
+      databaseAssetSelect: async () => [selectedAsset],
       fetcher: (async (input, init) => {
         const path = new URL(String(input)).pathname;
+        if (path === "/api/v1/perms/users/self/assets/") {
+          return jsonResponse({ count: 1, next: null, results: [selectedAsset] });
+        }
         if (path === "/api/v1/accounts/accounts/username-suggestions/") {
           return jsonResponse(["main-user"], 201);
         }
@@ -692,6 +753,12 @@ describe("CLI command surface", () => {
     const stderr: string[] = [];
     const confirmations: Array<{ message: string; initialValue: boolean | undefined }> = [];
     let tokenCreateBody: string | undefined;
+    const selectedAsset = {
+      id: "database-1",
+      name: "prod-main-db",
+      address: "10.0.0.10",
+      protocols: [{ name: "mysql", port: 3306 }]
+    };
 
     const program = buildTestProgram({
       stdout: (value) => stdout.push(value),
@@ -700,16 +767,12 @@ describe("CLI command surface", () => {
         confirmations.push({ message, initialValue });
         return true;
       },
-      databaseAssetSelect: async () => [
-        {
-          id: "database-1",
-          name: "prod-main-db",
-          address: "10.0.0.10",
-          protocols: [{ name: "mysql", port: 3306 }]
-        }
-      ],
+      databaseAssetSelect: async () => [selectedAsset],
       fetcher: (async (input, init) => {
         const path = new URL(String(input)).pathname;
+        if (path === "/api/v1/perms/users/self/assets/") {
+          return jsonResponse({ count: 1, next: null, results: [selectedAsset] });
+        }
         if (path === "/api/v1/accounts/accounts/username-suggestions/") {
           return jsonResponse(["main-user"], 201);
         }
@@ -919,6 +982,80 @@ describe("CLI command surface", () => {
     expect(source).toContain("clearSubmittedPromptDisplay(processStderr");
     expect(source).toMatch(/selectDatabaseAssetsWithClack[\s\S]+clearSubmittedPromptDisplay\(processStderr/);
     expect(source).toMatch(/confirmFromTerminal[\s\S]+clearSubmittedPromptDisplay\(processStderr/);
+  });
+
+  it("uses a single matching database asset without opening the asset selector", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const assetRequestUrls: string[] = [];
+    let tokenCreateBody: string | undefined;
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      databaseAssetSelect: async () => {
+        throw new Error("database asset selector should not run for a single matching asset");
+      },
+      select: async () => {
+        throw new Error("select prompt should not run for a single matching asset and username");
+      },
+      fetcher: (async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/api/v1/perms/users/self/assets/") {
+          assetRequestUrls.push(url.href);
+          return jsonResponse({
+            count: 1,
+            next: null,
+            results: [
+              {
+                id: "database-1",
+                name: "single-main-db",
+                address: "10.0.0.10",
+                protocols: [{ name: "mysql", port: 3306 }]
+              }
+            ]
+          });
+        }
+        if (url.pathname === "/api/v1/accounts/accounts/username-suggestions/") {
+          return jsonResponse(["single-user"], 201);
+        }
+        if (url.pathname === "/api/v1/users/connection-token/") {
+          tokenCreateBody = typeof init?.body === "string" ? init.body : undefined;
+          return jsonResponse({ id: "connection-token-single", date_expired: "2026-06-12T10:00:00+08:00" }, 201);
+        }
+        if (url.pathname === "/api/v1/users/connection-token/connection-token-single/client-url/") {
+          return jsonResponse({ url: "jms://connect/single" });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${url.pathname}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "databases",
+        "token",
+        "single-main"
+      ],
+      { from: "node" }
+    );
+
+    expect(stderr).toEqual([]);
+    expect(assetRequestUrls).toEqual([
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=single-main&limit=20"
+    ]);
+    expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
+      asset: "database-1",
+      account: "single-main-db-账号",
+      input_username: "single-user"
+    });
+    expect(stdout.join("")).toContain("single-main-db (10.0.0.10)");
   });
 
   it("uses keyboard-style selection when the token command matches multiple assets or usernames", async () => {
