@@ -44,6 +44,7 @@ describe("CLI command surface", () => {
     expect(commandNames.has("users")).toBe(true);
     expect(commandNames.has("assets_favorite-assets_read")).toBe(false);
     expect(findCommandPath(program, ["assets", "databases", "token"])).toBeTruthy();
+    expect(findCommandPath(program, ["assets", "hosts", "token"])).toBeTruthy();
   });
 
   it("collapses repeated OpenAPI tag segments in command paths", () => {
@@ -281,6 +282,403 @@ describe("CLI command surface", () => {
     expect(help).toContain("Body: none");
     expect(help).toContain("Example:");
     expect(help).toContain("jms assets databases match --query search=value");
+  });
+
+  it("prints SSH connection tables for selected host token credentials by default", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const requests: Array<{ url: string; method: string | undefined; body?: string }> = [];
+    const selectedAsset = {
+      id: "6bb3e28-885e-4f30-86b9-12acd73f7702",
+      name: "离线任务机",
+      address: "10.0.33.157",
+      protocols: [{ name: "ssh", port: 22 }]
+    };
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      hostAssetSelect: async () => {
+        throw new Error("host asset selector should not run for a single matching asset");
+      },
+      select: async () => {
+        throw new Error("select prompt should not run for a single matching host and account");
+      },
+      fetcher: (async (input, init) => {
+        const url = new URL(String(input));
+        requests.push({
+          url: url.href,
+          method: init?.method,
+          ...(typeof init?.body === "string" ? { body: init.body } : {})
+        });
+
+        if (url.pathname === "/api/v1/perms/users/self/assets/") {
+          return jsonResponse({ count: 1, next: null, results: [selectedAsset] });
+        }
+        if (url.pathname === "/api/v1/users/profile/") {
+          return jsonResponse({ username: "alice@example.test" });
+        }
+        if (url.pathname === "/api/v1/perms/users/self/assets/6bb3e28-885e-4f30-86b9-12acd73f7702/") {
+          return jsonResponse({
+            id: selectedAsset.id,
+            permed_accounts: [
+              {
+                id: "account-dev-id",
+                alias: "account-dev-id",
+                username: "dev",
+                has_secret: true
+              }
+            ]
+          });
+        }
+        if (url.pathname === "/api/v1/users/connection-token/") {
+          return jsonResponse(
+            {
+              id: "JMS-cbd26f2a-8b8e-4a40-ae44-15c5a81cc3b4",
+              value: "token-password",
+              date_expired: "2026/09/23 10:23:01 +0800"
+            },
+            201
+          );
+        }
+        if (url.pathname === "/api/v1/users/connection-token/JMS-cbd26f2a-8b8e-4a40-ae44-15c5a81cc3b4/client-url/") {
+          return jsonResponse({
+            url: jmsUrl({
+              id: "JMS-cbd26f2a-8b8e-4a40-ae44-15c5a81cc3b4",
+              value: "token-password",
+              protocol: "ssh",
+              token: {
+                id: "JMS-cbd26f2a-8b8e-4a40-ae44-15c5a81cc3b4",
+                value: "token-password"
+              },
+              endpoint: { host: "jumpserver.ssh.example.test", port: 2222 }
+            })
+          });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${url.pathname}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "hosts",
+        "token",
+        "离线任务"
+      ],
+      { from: "node" }
+    );
+
+    const output = stdout.join("");
+    const assetRequest = requests.find((request) => new URL(request.url).pathname === "/api/v1/perms/users/self/assets/");
+    const assetRequestUrl = new URL(assetRequest?.url ?? "https://missing.invalid/");
+    const tokenCreateBody = JSON.parse(
+      requests.find((request) => request.url.endsWith("/api/v1/users/connection-token/"))?.body ?? "{}"
+    );
+
+    expect(stderr).toEqual([]);
+    expect(assetRequestUrl.searchParams.get("category")).toBe("host");
+    expect(assetRequestUrl.searchParams.get("search")).toBe("离线任务");
+    expect(assetRequestUrl.searchParams.get("limit")).toBe("20");
+    expect(tokenCreateBody).toMatchObject({
+      asset: "6bb3e28-885e-4f30-86b9-12acd73f7702",
+      account: "account-dev-id",
+      protocol: "ssh",
+      input_username: "",
+      connect_method: "ssh_guide",
+      connect_options: {
+        reusable: false
+      }
+    });
+    expect(output).toContain("离线任务机 (10.0.33.157)");
+    expect(output).toContain("│ 主机");
+    expect(output).toContain("jumpserver.ssh.example.test");
+    expect(output).toContain("│ 端口");
+    expect(output).toContain("2222");
+    expect(output).toContain("│ 用户名");
+    expect(output).toContain("JMS-cbd26f2a-8b8e-4a40-ae44-15c5a81cc3b4");
+    expect(output).toContain("│ 密码");
+    expect(output).toContain("token-password");
+    expect(output).toContain("│ 连接命令行");
+    expect(output).toContain("ssh JMS-cbd26f2a-8b8e-4a40-ae44-15c5a81cc3b4@jumpserver.ssh.example.test -p 2222");
+    expect(output).toContain("│ 资产账号命令");
+    expect(output).toContain(
+      "ssh alice@example.test#dev#6bb3e28-885e-4f30-86b9-12acd73f7702@jumpserver.ssh.example.test -p 2222"
+    );
+    expect(output).toContain("Token 命令密码是表格中的密码");
+    expect(output).not.toContain("jms://");
+  });
+
+  it("prints only SSH command lines for selected host tokens with --ssh-command", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const selectedAsset = {
+      id: "host-1",
+      name: "prod-app",
+      address: "10.0.0.20",
+      protocols: [{ name: "ssh", port: 22 }]
+    };
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      fetcher: (async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/api/v1/perms/users/self/assets/") {
+          return jsonResponse({ count: 1, next: null, results: [selectedAsset] });
+        }
+        if (url.pathname === "/api/v1/users/profile/") {
+          return jsonResponse({ username: "alice" });
+        }
+        if (url.pathname === "/api/v1/perms/users/self/assets/host-1/") {
+          return jsonResponse({
+            id: "host-1",
+            permed_accounts: [{ id: "root-account", alias: "root-account", username: "root" }]
+          });
+        }
+        if (url.pathname === "/api/v1/users/connection-token/") {
+          return jsonResponse({ id: "JMS-host-1", value: "password-1" }, 201);
+        }
+        if (url.pathname === "/api/v1/users/connection-token/JMS-host-1/client-url/") {
+          return jsonResponse({
+            url: jmsUrl({
+              id: "JMS-host-1",
+              value: "password-1",
+              token: { id: "JMS-host-1", value: "password-1" },
+              endpoint: { host: "jumpserver.example.test", port: 2222 }
+            })
+          });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${url.pathname}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "hosts",
+        "token",
+        "prod-app",
+        "--ssh-command"
+      ],
+      { from: "node" }
+    );
+
+    expect(stderr).toEqual([]);
+    expect(stdout.join("")).toBe("ssh JMS-host-1@jumpserver.example.test -p 2222\n");
+  });
+
+  it("prints SSH credentials for every permitted host asset with --all", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const assetRequestUrls: string[] = [];
+    const tokenCreateBodies: unknown[] = [];
+    const assets = [
+      {
+        id: "host-1",
+        name: "prod-app-1",
+        address: "10.0.0.21",
+        protocols: [{ name: "ssh", port: 22 }]
+      },
+      {
+        id: "host-2",
+        name: "prod-app-2",
+        address: "10.0.0.22",
+        protocols: [{ name: "ssh", port: 22 }]
+      }
+    ];
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      confirm: async () => {
+        throw new Error("reusable prompt should not run when --all is used");
+      },
+      hostAssetSelect: async () => {
+        throw new Error("host selector should not run when --all is used");
+      },
+      select: async () => {
+        throw new Error("select prompt should not run when --all is used");
+      },
+      fetcher: (async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/api/v1/perms/users/self/assets/") {
+          assetRequestUrls.push(url.href);
+          return jsonResponse({ count: assets.length, next: null, results: assets });
+        }
+        if (url.pathname === "/api/v1/users/profile/") {
+          return jsonResponse({ username: "alice" });
+        }
+        const assetDetailMatch = url.pathname.match(/^\/api\/v1\/perms\/users\/self\/assets\/(host-\d+)\/$/);
+        if (assetDetailMatch) {
+          const assetId = assetDetailMatch[1]!;
+          return jsonResponse({
+            id: assetId,
+            permed_accounts: [
+              {
+                id: `${assetId}-account-id`,
+                alias: `${assetId}-account-id`,
+                username: `${assetId}-user`
+              }
+            ]
+          });
+        }
+        if (url.pathname === "/api/v1/users/connection-token/") {
+          const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { asset?: string };
+          tokenCreateBodies.push(body);
+          return jsonResponse({ id: `JMS-${body.asset}`, value: `password-${body.asset}` }, 201);
+        }
+        const clientUrlMatch = url.pathname.match(/^\/api\/v1\/users\/connection-token\/JMS-(host-\d+)\/client-url\/$/);
+        if (clientUrlMatch) {
+          const assetId = clientUrlMatch[1]!;
+          return jsonResponse({
+            url: jmsUrl({
+              id: `JMS-${assetId}`,
+              value: `password-${assetId}`,
+              token: { id: `JMS-${assetId}`, value: `password-${assetId}` },
+              endpoint: { host: "jumpserver.example.test", port: 2222 }
+            })
+          });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${url.pathname}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "hosts",
+        "token",
+        "--all"
+      ],
+      { from: "node" }
+    );
+
+    const output = stdout.join("");
+
+    expect(stderr).toEqual([]);
+    expect(assetRequestUrls).toEqual([
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=host&limit=20"
+    ]);
+    expect(tokenCreateBodies).toMatchObject([
+      { asset: "host-1", account: "host-1-account-id", connect_method: "ssh_guide" },
+      { asset: "host-2", account: "host-2-account-id", connect_method: "ssh_guide" }
+    ]);
+    expect(output).toContain("prod-app-1 (10.0.0.21)");
+    expect(output).toContain("prod-app-2 (10.0.0.22)");
+    expect(output).toContain("ssh JMS-host-1@jumpserver.example.test -p 2222");
+    expect(output).toContain("ssh JMS-host-2@jumpserver.example.test -p 2222");
+    expect(output).toMatch(/└[─]+┴[─]+┘\n\n[─]{10,}\n\n┌/);
+  });
+
+  it("lets the host asset selector search and call the permitted host asset API", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const assetRequestUrls: string[] = [];
+    let tokenCreateBody: string | undefined;
+
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value),
+      select: async () => {
+        throw new Error("generic select should not choose host assets");
+      },
+      hostAssetSelect: async (_message, input) => {
+        await input.fetchPage(input.initialSearch, 0);
+        const selectedPage = await input.fetchPage("billing", 0);
+        return [selectedPage.items[0]!];
+      },
+      fetcher: (async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/api/v1/perms/users/self/assets/") {
+          assetRequestUrls.push(url.href);
+          const search = url.searchParams.get("search") ?? "first";
+          const isBillingSearch = search === "billing";
+          return jsonResponse({
+            count: isBillingSearch ? 1 : 2,
+            next: isBillingSearch ? null : "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=host&search=prod&limit=20&offset=1",
+            results: [
+              {
+                id: isBillingSearch ? "host-billing" : "host-first",
+                name: isBillingSearch ? "billing-host" : "first-host",
+                address: isBillingSearch ? "10.0.0.30" : "10.0.0.29",
+                protocols: [{ name: "ssh", port: 22 }]
+              }
+            ]
+          });
+        }
+        if (url.pathname === "/api/v1/users/profile/") {
+          return jsonResponse({ username: "alice" });
+        }
+        if (url.pathname === "/api/v1/perms/users/self/assets/host-billing/") {
+          return jsonResponse({
+            id: "host-billing",
+            permed_accounts: [{ id: "billing-account-id", alias: "billing-account-id", username: "billing-user" }]
+          });
+        }
+        if (url.pathname === "/api/v1/users/connection-token/") {
+          tokenCreateBody = typeof init?.body === "string" ? init.body : undefined;
+          return jsonResponse({ id: "JMS-billing", value: "billing-password" }, 201);
+        }
+        if (url.pathname === "/api/v1/users/connection-token/JMS-billing/client-url/") {
+          return jsonResponse({
+            url: jmsUrl({
+              id: "JMS-billing",
+              value: "billing-password",
+              token: { id: "JMS-billing", value: "billing-password" },
+              endpoint: { host: "jumpserver.example.test", port: 2222 }
+            })
+          });
+        }
+        return jsonResponse({ detail: `Unexpected request: ${url.pathname}` }, 404);
+      }) as typeof fetch
+    });
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "auth-token",
+        "assets",
+        "hosts",
+        "token",
+        "prod"
+      ],
+      { from: "node" }
+    );
+
+    expect(stderr).toEqual([]);
+    expect(assetRequestUrls).toEqual([
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=host&search=prod&limit=20",
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=host&search=billing&limit=20"
+    ]);
+    expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
+      asset: "host-billing",
+      account: "billing-account-id",
+      connect_method: "ssh_guide"
+    });
+    expect(stdout.join("")).toContain("billing-host (10.0.0.30)");
   });
 
   it("prints Web UI-style connection tables for all selected database token credentials by default", async () => {
@@ -971,9 +1369,19 @@ describe("CLI command surface", () => {
   it("submits terminal database multi-select without a confirmation prompt", async () => {
     const source = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
 
-    expect(source).toContain("clackMultiselect<DatabaseAsset | DatabaseAssetNavigationChoice>");
+    expect(source).toContain("searchableClackMultiselect<DatabaseAsset | DatabaseAssetNavigationChoice>");
     expect(source).not.toContain("完成选择");
     expect(source).not.toContain('message: "下一步"');
+  });
+
+  it("supports slash search shortcuts in terminal host and database selectors", async () => {
+    const source = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
+
+    expect(source).toContain('return char === "/" || key.sequence === "/" || key.name === "slash";');
+    expect(source).toMatch(/selectDatabaseAssetsWithClack[\s\S]+ASSET_SEARCH_SHORTCUT[\s\S]+return \[\{ type: "search" \}\]/);
+    expect(source).toMatch(/selectHostAssetsWithClack[\s\S]+ASSET_SEARCH_SHORTCUT[\s\S]+return \[\{ type: "search" \}\]/);
+    expect(source).toMatch(/selectDatabaseAssetsWithClack[\s\S]+按 \/ 搜索/);
+    expect(source).toMatch(/selectHostAssetsWithClack[\s\S]+按 \/ 搜索/);
   });
 
   it("clears submitted terminal prompt display before printing database token data", async () => {

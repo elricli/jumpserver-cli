@@ -132,6 +132,28 @@ Request options:
 - `--include-headers`: include the HTTP status line.
 - `--json`: print the raw JSON response instead of the compact table.
 
+## Connection Tokens
+
+Create database connection tokens and print database client commands:
+
+```bash
+jms assets databases token "prod-*"
+jms assets databases token "prod-*" --dsn
+jms assets databases token --all --limit 50
+```
+
+Create host SSH connection tokens and print SSH commands:
+
+```bash
+jms assets hosts token "prod-*"
+jms assets hosts token "prod-*" --ssh-command
+jms assets hosts token --all --limit 50
+```
+
+`assets hosts token` uses JumpServer's SSH Guide connection method (`ssh_guide`). The default table includes the temporary Token SSH command, and when the current profile username is available it also prints the direct asset/account username command. Use `--login-username` to override the JumpServer login username used in that direct command.
+
+In interactive database and host asset selectors, press `/` to enter a new search term. The selector reloads results from JumpServer with that search query instead of filtering only the currently loaded page.
+
 ## Verification
 
 ```bash

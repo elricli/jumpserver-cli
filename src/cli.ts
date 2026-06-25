@@ -46,6 +46,12 @@ export interface DatabaseAssetSelectionInput {
   fetchPage: (search: string | undefined, offset: number) => Promise<DatabaseAssetPage>;
 }
 export type DatabaseAssetSelectPrompt = (message: string, input: DatabaseAssetSelectionInput) => Promise<DatabaseAsset[]>;
+export interface HostAssetSelectionInput {
+  initialSearch?: string;
+  pageSize: number;
+  fetchPage: (search: string | undefined, offset: number) => Promise<HostAssetPage>;
+}
+export type HostAssetSelectPrompt = (message: string, input: HostAssetSelectionInput) => Promise<HostAsset[]>;
 
 export interface BuildProgramOptions {
   operations?: ApiOperation[];
@@ -58,6 +64,7 @@ export interface BuildProgramOptions {
   confirm?: ConfirmPrompt;
   select?: SelectPrompt;
   databaseAssetSelect?: DatabaseAssetSelectPrompt;
+  hostAssetSelect?: HostAssetSelectPrompt;
   upgradeRunner?: UpgradeRunner;
   configPath?: string;
   env?: NodeJS.ProcessEnv;
@@ -114,12 +121,31 @@ interface DatabaseTokenCommandOptions {
   reusable?: boolean;
 }
 
+interface HostTokenCommandOptions {
+  account?: string;
+  accountUsername?: string;
+  loginUsername?: string;
+  connectMethod?: string;
+  protocol?: string;
+  all?: boolean;
+  limit?: string;
+  jmsUrl?: boolean;
+  sshCommand?: boolean;
+  json?: boolean;
+  reusable?: boolean;
+}
+
 const AUTH_COMPLETE_MESSAGE = "认证完成";
 const DEFAULT_DATABASE_TOKEN_LIMIT = 20;
 const DEFAULT_DATABASE_CONNECT_METHOD = "db_guide";
 const DEFAULT_DATABASE_REUSABLE = false;
+const DEFAULT_HOST_TOKEN_LIMIT = 20;
+const DEFAULT_HOST_CONNECT_METHOD = "ssh_guide";
+const DEFAULT_HOST_REUSABLE = false;
+const DEFAULT_SSH_PORT = 2222;
 const DEFAULT_TERMINAL_COLUMNS = 120;
 const MIN_DATABASE_TABLE_VALUE_WIDTH = 12;
+const ASSET_SEARCH_SHORTCUT = Symbol("asset-search-shortcut");
 const DEFAULT_DATABASE_CONNECT_OPTIONS = {
   charset: "default",
   disableautohash: false,
@@ -144,6 +170,26 @@ const PERMED_DATABASE_ASSET_DETAIL_OPERATION: ApiOperation = {
   operationId: "perms_users_self_database_asset_read",
   tag: "perms_users",
   summary: "Read current user's permitted database asset detail",
+  queryParameters: [],
+  pathParameters: [{ name: "id", required: true, schema: { type: "string" } }]
+};
+const PERMED_HOST_ASSETS_OPERATION: ApiOperation = {
+  method: "GET",
+  path: "/perms/users/self/assets/",
+  basePath: "/api/v1",
+  operationId: "perms_users_self_host_assets_list",
+  tag: "perms_users",
+  summary: "List current user's permitted host assets",
+  queryParameters: [],
+  pathParameters: []
+};
+const PERMED_HOST_ASSET_DETAIL_OPERATION: ApiOperation = {
+  method: "GET",
+  path: "/perms/users/self/assets/{id}/",
+  basePath: "/api/v1",
+  operationId: "perms_users_self_host_asset_read",
+  tag: "perms_users",
+  summary: "Read current user's permitted host asset detail",
   queryParameters: [],
   pathParameters: [{ name: "id", required: true, schema: { type: "string" } }]
 };
@@ -265,6 +311,9 @@ export function buildProgram(options: BuildProgramOptions = {}): Command {
   const databaseAssetSelect =
     options.databaseAssetSelect ??
     (stdin.isTTY && !options.select ? selectDatabaseAssetFromTerminal : databaseAssetSelectFromChoicePrompt(select));
+  const hostAssetSelect =
+    options.hostAssetSelect ??
+    (stdin.isTTY && !options.select ? selectHostAssetFromTerminal : hostAssetSelectFromChoicePrompt(select));
   const upgradeRunner = options.upgradeRunner ?? runUpgradeProcess;
   const env = options.env ?? process.env;
   const configPath = resolveConfigPath(options.configPath, env);
@@ -279,7 +328,9 @@ export function buildProgram(options: BuildProgramOptions = {}): Command {
     confirm,
     select,
     databaseAssetSelect,
+    hostAssetSelect,
     canConfirmDatabaseReusable: options.confirm !== undefined || stdin.isTTY,
+    canConfirmHostReusable: options.confirm !== undefined || stdin.isTTY,
     configPath,
     config,
     env,
@@ -388,6 +439,7 @@ export function buildProgram(options: BuildProgramOptions = {}): Command {
     });
 
   registerDatabaseTokenCommand(program, operations, context);
+  registerHostTokenCommand(program, operations, context);
   registerOperationCommands(program, operations, context);
 
   return program;
@@ -463,6 +515,29 @@ function registerDatabaseTokenCommand(parent: Command, operations: ApiOperation[
     .option("--json", "Print JSON")
     .action(async (pattern: string | undefined, options: DatabaseTokenCommandOptions, command: Command) => {
       await runDatabaseTokenCommand(pattern, options, command, operations, context);
+    });
+}
+
+function registerHostTokenCommand(parent: Command, operations: ApiOperation[], context: InteractiveRunContext): void {
+  const hostsCommand = getOrCreateCommandPath(parent, ["assets", "hosts"]);
+  hostsCommand
+    .command("token")
+    .description("Create a host SSH connection token")
+    .argument("[pattern]", "Host asset name glob or substring")
+    .option("--account <name>", "JumpServer asset account alias/name, defaults to a permitted account")
+    .option("--account-username <username>", "Asset account username for direct SSH command, defaults to the account username")
+    .option("--login-username <username>", "JumpServer login username for direct SSH command, defaults to the current profile")
+    .option("--connect-method <method>", "JumpServer connection method", DEFAULT_HOST_CONNECT_METHOD)
+    .option("--protocol <protocol>", "Host protocol, defaults to ssh")
+    .option("--all", "Create tokens for all matching permitted host assets without prompting")
+    .option("--limit <number>", "Host asset page size", String(DEFAULT_HOST_TOKEN_LIMIT))
+    .option("--reusable", "Enable reusable SSH token")
+    .option("--no-reusable", "Disable reusable SSH token")
+    .option("--jms-url", "Print the raw JumpServer jms:// client URL")
+    .option("--ssh-command", "Print only SSH command lines")
+    .option("--json", "Print JSON")
+    .action(async (pattern: string | undefined, options: HostTokenCommandOptions, command: Command) => {
+      await runHostTokenCommand(pattern, options, command, operations, context);
     });
 }
 
@@ -621,7 +696,9 @@ interface InteractiveRunContext extends RunContext {
   confirm: ConfirmPrompt;
   select: SelectPrompt;
   databaseAssetSelect: DatabaseAssetSelectPrompt;
+  hostAssetSelect: HostAssetSelectPrompt;
   canConfirmDatabaseReusable: boolean;
+  canConfirmHostReusable: boolean;
 }
 
 type LoginRunContext = InteractiveRunContext;
@@ -641,6 +718,21 @@ export interface DatabaseAssetPage {
   hasMore: boolean;
 }
 
+export interface HostAsset {
+  id: string;
+  name: string;
+  address?: string;
+  protocols?: unknown;
+  platform?: unknown;
+}
+
+export interface HostAssetPage {
+  items: HostAsset[];
+  count?: number;
+  nextOffset: number;
+  hasMore: boolean;
+}
+
 interface DatabasePermedAccount {
   alias: string;
   username: string;
@@ -649,6 +741,11 @@ interface DatabasePermedAccount {
 interface DatabaseTokenIdentity {
   account: string;
   inputUsername: string;
+}
+
+interface HostTokenIdentity {
+  account: string;
+  accountUsername: string;
 }
 
 interface LoadMoreDatabaseAssetsChoice {
@@ -662,6 +759,15 @@ interface DatabaseGuideConnection {
   password: string;
   database?: string;
   command: string;
+}
+
+interface HostSshConnection {
+  host: string;
+  port: number;
+  username: string;
+  password?: string;
+  command: string;
+  accountCommand?: string;
 }
 
 interface DatabaseTokenOutput {
@@ -680,6 +786,25 @@ interface DatabaseTokenOutput {
   expiresAt?: string;
   dbGuide?: DatabaseGuideConnection;
   dsn?: string;
+  jmsUrl?: string;
+}
+
+interface HostTokenOutput {
+  asset: {
+    id: string;
+    name: string;
+    address?: string;
+  };
+  account: string;
+  accountUsername: string;
+  loginUsername?: string;
+  password?: string;
+  protocol: string;
+  connectMethod: string;
+  reusable: boolean;
+  tokenId: string;
+  expiresAt?: string;
+  sshGuide?: HostSshConnection;
   jmsUrl?: string;
 }
 
@@ -796,6 +921,39 @@ async function runDatabaseTokenCommand(
   }
 }
 
+async function runHostTokenCommand(
+  pattern: string | undefined,
+  options: HostTokenCommandOptions,
+  command: Command,
+  operations: ApiOperation[],
+  context: InteractiveRunContext
+): Promise<void> {
+  try {
+    const limit = parsePositiveInteger(options.limit ?? String(DEFAULT_HOST_TOKEN_LIMIT), "--limit");
+    const assets = options.all
+      ? await fetchAllHostAssets(pattern, limit, command, context)
+      : await choosePaginatedHostAssets(pattern, limit, command, context);
+    if (assets.length === 0) {
+      throw new Error("未选择主机");
+    }
+    const reusable = await resolveHostReusable(options, context);
+    const loginUsername = options.sshCommand
+      ? undefined
+      : await resolveHostLoginUsername(options, command, operations, context);
+
+    const outputs: HostTokenOutput[] = [];
+    for (const asset of assets) {
+      outputs.push(await createHostTokenOutput(asset, options, reusable, loginUsername, command, operations, context));
+    }
+
+    context.stdout(formatHostTokenOutputs(outputs, options, context.terminalColumns));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    context.stderr(`${message}\n`);
+    process.exitCode = 1;
+  }
+}
+
 async function createDatabaseTokenOutput(
   asset: DatabaseAsset,
   options: DatabaseTokenCommandOptions,
@@ -852,6 +1010,66 @@ async function createDatabaseTokenOutput(
   };
 }
 
+async function createHostTokenOutput(
+  asset: HostAsset,
+  options: HostTokenCommandOptions,
+  reusable: boolean,
+  loginUsername: string | undefined,
+  command: Command,
+  operations: ApiOperation[],
+  context: InteractiveRunContext
+): Promise<HostTokenOutput> {
+  const { account, accountUsername } = await resolveHostTokenIdentity(asset, options, command, context);
+  const protocol = options.protocol ?? defaultHostProtocol(asset);
+  const connectMethod = options.connectMethod ?? DEFAULT_HOST_CONNECT_METHOD;
+  const tokenPayload = await callOperationJson({
+    operation: findOperation("users_connection-token_create", operations),
+    command,
+    context,
+    body: {
+      asset: asset.id,
+      account,
+      protocol,
+      input_username: "",
+      input_secret: "",
+      connect_method: connectMethod,
+      connect_options: buildHostConnectOptions(reusable)
+    }
+  });
+  const token = normalizeConnectionToken(tokenPayload);
+  const clientUrlPayload = await callOperationJson({
+    operation: findOperation("users_connection-token_client-url_read", operations),
+    command,
+    context,
+    pathValues: { id: token.id }
+  });
+  const jmsUrl = extractClientUrl(clientUrlPayload);
+  const sshGuide = extractHostSshConnection(jmsUrl, token, {
+    asset,
+    accountUsername,
+    ...(loginUsername ? { loginUsername } : {})
+  });
+
+  return {
+    asset: {
+      id: asset.id,
+      name: asset.name,
+      ...(asset.address ? { address: asset.address } : {})
+    },
+    account,
+    accountUsername,
+    ...(loginUsername ? { loginUsername } : {}),
+    ...(token.password ? { password: token.password } : {}),
+    protocol,
+    connectMethod,
+    reusable,
+    tokenId: token.id,
+    ...(token.expiresAt ? { expiresAt: token.expiresAt } : {}),
+    ...(sshGuide ? { sshGuide } : {}),
+    ...(options.jmsUrl ? { jmsUrl } : {})
+  };
+}
+
 async function resolveDatabaseTokenIdentity(
   asset: DatabaseAsset,
   options: DatabaseTokenCommandOptions,
@@ -882,6 +1100,26 @@ async function resolveDatabaseTokenIdentity(
   return { account: defaultDatabaseAccountName(asset.name), inputUsername };
 }
 
+async function resolveHostTokenIdentity(
+  asset: HostAsset,
+  options: HostTokenCommandOptions,
+  command: Command,
+  context: InteractiveRunContext
+): Promise<HostTokenIdentity> {
+  if (options.account) {
+    return {
+      account: options.account,
+      accountUsername: options.accountUsername ?? options.account
+    };
+  }
+
+  const account = await chooseHostPermedAccount(asset, command, context, !options.all);
+  return {
+    account: account.alias,
+    accountUsername: options.accountUsername ?? account.username
+  };
+}
+
 async function chooseDatabasePermedAccount(
   asset: DatabaseAsset,
   command: Command,
@@ -893,6 +1131,31 @@ async function chooseDatabasePermedAccount(
     throw new Error(`数据库实例没有可用授权账号: ${asset.name}`);
   }
   return account;
+}
+
+async function chooseHostPermedAccount(
+  asset: HostAsset,
+  command: Command,
+  context: InteractiveRunContext,
+  allowInteractiveSelection: boolean
+): Promise<DatabasePermedAccount> {
+  const accounts = await fetchHostPermedAccounts(asset, command, context);
+  const nonVirtualAccounts = accounts.filter((item) => !item.alias.startsWith("@"));
+  const candidates = nonVirtualAccounts.length > 0 ? nonVirtualAccounts : accounts;
+  if (candidates.length === 0) {
+    throw new Error(`主机没有可用授权账号: ${asset.name}`);
+  }
+  if (candidates.length === 1 || !allowInteractiveSelection) {
+    return candidates[0]!;
+  }
+
+  return context.select(
+    "请选择主机账号",
+    candidates.map((account) => ({
+      label: formatHostAccountOption(account),
+      value: account
+    }))
+  );
 }
 
 async function resolveDatabaseReusable(
@@ -911,11 +1174,53 @@ async function resolveDatabaseReusable(
   return context.confirm("是否开启复用", DEFAULT_DATABASE_REUSABLE);
 }
 
+async function resolveHostReusable(
+  options: HostTokenCommandOptions,
+  context: InteractiveRunContext
+): Promise<boolean> {
+  if (options.reusable !== undefined) {
+    return options.reusable;
+  }
+  if (options.all) {
+    return DEFAULT_HOST_REUSABLE;
+  }
+  if (!context.canConfirmHostReusable) {
+    return DEFAULT_HOST_REUSABLE;
+  }
+  return context.confirm("是否开启复用", DEFAULT_HOST_REUSABLE);
+}
+
+async function resolveHostLoginUsername(
+  options: HostTokenCommandOptions,
+  command: Command,
+  operations: ApiOperation[],
+  context: RunContext
+): Promise<string | undefined> {
+  if (options.loginUsername) {
+    return options.loginUsername;
+  }
+
+  try {
+    const payload = await callOperationJson({
+      operation: findOperation("users_profile_read", operations),
+      command,
+      context
+    });
+    return extractLoginUsername(payload);
+  } catch {
+    return undefined;
+  }
+}
+
 function buildDatabaseConnectOptions(reusable: boolean): typeof DEFAULT_DATABASE_CONNECT_OPTIONS & { reusable: boolean } {
   return {
     ...DEFAULT_DATABASE_CONNECT_OPTIONS,
     reusable
   };
+}
+
+function buildHostConnectOptions(reusable: boolean): { reusable: boolean } {
+  return { reusable };
 }
 
 async function choosePaginatedDatabaseAssets(
@@ -954,6 +1259,41 @@ async function choosePaginatedDatabaseAssets(
   );
 }
 
+async function choosePaginatedHostAssets(
+  pattern: string | undefined,
+  limit: number,
+  command: Command,
+  context: InteractiveRunContext
+): Promise<HostAsset[]> {
+  const initialSearch = searchTextFromGlob(pattern);
+  const pageCache = new Map<string, HostAssetPage>();
+  const fetchPage: HostAssetSelectionInput["fetchPage"] = async (search, offset) => {
+    const cacheKey = `${search ?? ""}\0${offset}`;
+    const cachedPage = pageCache.get(cacheKey);
+    if (cachedPage) {
+      return cachedPage;
+    }
+    const page = await fetchHostAssetsPage(search, limit, offset, command, context);
+    pageCache.set(cacheKey, page);
+    return page;
+  };
+  if (initialSearch) {
+    const firstPage = await fetchPage(initialSearch, 0);
+    if (firstPage.items.length === 1 && !firstPage.hasMore) {
+      return [firstPage.items[0]!];
+    }
+  }
+
+  return context.hostAssetSelect(
+    pattern ? "匹配到多个主机" : "请选择主机",
+    {
+      ...(initialSearch ? { initialSearch } : {}),
+      pageSize: limit,
+      fetchPage
+    }
+  );
+}
+
 async function fetchAllDatabaseAssets(
   pattern: string | undefined,
   limit: number,
@@ -969,6 +1309,44 @@ async function fetchAllDatabaseAssets(
 
   while (hasMore) {
     const page = await fetchDatabaseAssetsPage(search, limit, offset, command, context);
+    hasMore = page.hasMore;
+    offset = page.nextOffset;
+
+    let newFetchedAssets = 0;
+    for (const asset of page.items) {
+      if (!seenFetchedAssetIds.has(asset.id)) {
+        seenFetchedAssetIds.add(asset.id);
+        newFetchedAssets += 1;
+      }
+      if (!seenAssetIds.has(asset.id)) {
+        seenAssetIds.add(asset.id);
+        assets.push(asset);
+      }
+    }
+
+    if (newFetchedAssets === 0) {
+      hasMore = false;
+    }
+  }
+
+  return assets;
+}
+
+async function fetchAllHostAssets(
+  pattern: string | undefined,
+  limit: number,
+  command: Command,
+  context: RunContext
+): Promise<HostAsset[]> {
+  const search = searchTextFromGlob(pattern);
+  const assets: HostAsset[] = [];
+  const seenAssetIds = new Set<string>();
+  const seenFetchedAssetIds = new Set<string>();
+  let hasMore = true;
+  let offset = 0;
+
+  while (hasMore) {
+    const page = await fetchHostAssetsPage(search, limit, offset, command, context);
     hasMore = page.hasMore;
     offset = page.nextOffset;
 
@@ -1053,6 +1431,67 @@ function databaseAssetSelectFromChoicePrompt(select: SelectPrompt): DatabaseAsse
   };
 }
 
+function hostAssetSelectFromChoicePrompt(select: SelectPrompt): HostAssetSelectPrompt {
+  return async (message, input) => {
+    const loadedAssets: HostAsset[] = [];
+    const seenAssetIds = new Set<string>();
+    const seenFetchedAssetIds = new Set<string>();
+    let count: number | undefined;
+    let hasMore = true;
+    let offset = 0;
+    let loadedCount = 0;
+
+    while (hasMore || loadedAssets.length > 0) {
+      if (hasMore) {
+        const page = await input.fetchPage(input.initialSearch, offset);
+        count = page.count;
+        hasMore = page.hasMore;
+        offset = page.nextOffset;
+        loadedCount = count === undefined ? offset : Math.min(offset, count);
+
+        let newFetchedAssets = 0;
+        for (const asset of page.items) {
+          if (!seenFetchedAssetIds.has(asset.id)) {
+            seenFetchedAssetIds.add(asset.id);
+            newFetchedAssets += 1;
+          }
+        }
+        if (newFetchedAssets === 0) {
+          hasMore = false;
+        }
+
+        for (const asset of page.items) {
+          if (!seenAssetIds.has(asset.id)) {
+            seenAssetIds.add(asset.id);
+            loadedAssets.push(asset);
+          }
+        }
+      }
+
+      if (loadedAssets.length === 0 && hasMore) {
+        continue;
+      }
+      if (loadedAssets.length === 0) {
+        throw new Error(input.initialSearch ? `未找到匹配的主机: ${input.initialSearch}` : "未找到可选择的主机");
+      }
+      if (input.initialSearch && loadedAssets.length === 1 && !hasMore) {
+        return [loadedAssets[0]!];
+      }
+
+      const selected = await selectHostAssetPage(loadedAssets, message, loadedCount, count, hasMore, select);
+      if (isLoadMoreHostAssetsChoice(selected)) {
+        if (!hasMore) {
+          continue;
+        }
+        continue;
+      }
+      return [selected];
+    }
+
+    throw new Error(input.initialSearch ? `未找到匹配的主机: ${input.initialSearch}` : "未找到可选择的主机");
+  };
+}
+
 async function fetchDatabaseAssetsPage(
   search: string | undefined,
   limit: number,
@@ -1074,6 +1513,27 @@ async function fetchDatabaseAssetsPage(
   return normalizeDatabaseAssetsPage(payload, limit, offset);
 }
 
+async function fetchHostAssetsPage(
+  search: string | undefined,
+  limit: number,
+  offset: number,
+  command: Command,
+  context: RunContext
+): Promise<HostAssetPage> {
+  const payload = await callOperationJson({
+    operation: PERMED_HOST_ASSETS_OPERATION,
+    command,
+    context,
+    queryValues: {
+      category: "host",
+      ...(search ? { search } : {}),
+      limit,
+      ...(offset > 0 ? { offset } : {})
+    }
+  });
+  return normalizeHostAssetsPage(payload, limit, offset);
+}
+
 async function fetchDatabasePermedAccounts(
   asset: DatabaseAsset,
   command: Command,
@@ -1081,6 +1541,20 @@ async function fetchDatabasePermedAccounts(
 ): Promise<DatabasePermedAccount[]> {
   const payload = await callOperationJson({
     operation: PERMED_DATABASE_ASSET_DETAIL_OPERATION,
+    command,
+    context,
+    pathValues: { id: asset.id }
+  });
+  return normalizeDatabasePermedAccounts(payload);
+}
+
+async function fetchHostPermedAccounts(
+  asset: HostAsset,
+  command: Command,
+  context: RunContext
+): Promise<DatabasePermedAccount[]> {
+  const payload = await callOperationJson({
+    operation: PERMED_HOST_ASSET_DETAIL_OPERATION,
     command,
     context,
     pathValues: { id: asset.id }
@@ -1100,6 +1574,40 @@ async function selectDatabaseAssetPage(
   const choices: Array<SelectChoice<DatabaseAsset | LoadMoreDatabaseAssetsChoice>> = [
     ...assets.map((asset) => ({
       label: formatDatabaseAssetOption(asset),
+      value: asset
+    })),
+    ...(hasMore
+      ? [
+          {
+            label:
+              count === undefined
+                ? `加载更多...（已加载 ${loadedCount}）`
+                : `加载更多...（已加载 ${loadedCount}/${count}）`,
+            value: loadMoreChoice
+          }
+        ]
+      : [])
+  ];
+
+  return select(message, choices);
+}
+
+interface LoadMoreHostAssetsChoice {
+  type: "load-more";
+}
+
+async function selectHostAssetPage(
+  assets: HostAsset[],
+  message: string,
+  loadedCount: number,
+  count: number | undefined,
+  hasMore: boolean,
+  select: SelectPrompt
+): Promise<HostAsset | LoadMoreHostAssetsChoice> {
+  const loadMoreChoice: LoadMoreHostAssetsChoice = { type: "load-more" };
+  const choices: Array<SelectChoice<HostAsset | LoadMoreHostAssetsChoice>> = [
+    ...assets.map((asset) => ({
+      label: formatHostAssetOption(asset),
       value: asset
     })),
     ...(hasMore
@@ -1446,6 +1954,14 @@ function normalizeDatabaseAssetsPage(payload: unknown, limit: number, offset: nu
   };
 }
 
+function normalizeHostAssetsPage(payload: unknown, limit: number, offset: number): HostAssetPage {
+  const page = normalizeDatabaseAssetsPage(payload, limit, offset);
+  return {
+    ...page,
+    items: page.items
+  };
+}
+
 function normalizeDatabasePermedAccounts(payload: unknown): DatabasePermedAccount[] {
   const items =
     isPlainObject(payload) && Array.isArray(payload.permed_accounts)
@@ -1490,6 +2006,10 @@ function matchDatabaseAssets(assets: DatabaseAsset[], pattern: string | undefine
 }
 
 function isLoadMoreDatabaseAssetsChoice(value: DatabaseAsset | LoadMoreDatabaseAssetsChoice): value is LoadMoreDatabaseAssetsChoice {
+  return isPlainObject(value) && value.type === "load-more";
+}
+
+function isLoadMoreHostAssetsChoice(value: HostAsset | LoadMoreHostAssetsChoice): value is LoadMoreHostAssetsChoice {
   return isPlainObject(value) && value.type === "load-more";
 }
 
@@ -1540,6 +2060,20 @@ function defaultDatabaseProtocol(asset: DatabaseAsset): string {
   return "mysql";
 }
 
+function defaultHostProtocol(asset: HostAsset): string {
+  if (Array.isArray(asset.protocols)) {
+    const sshProtocol = asset.protocols.find((item) => isPlainObject(item) && item.name === "ssh");
+    if (isPlainObject(sshProtocol) && typeof sshProtocol.name === "string") {
+      return sshProtocol.name;
+    }
+    const protocol = asset.protocols.find((item) => isPlainObject(item) && typeof item.name === "string");
+    if (isPlainObject(protocol) && typeof protocol.name === "string") {
+      return protocol.name;
+    }
+  }
+  return "ssh";
+}
+
 function defaultDatabaseAccountName(assetName: string): string {
   const suffixMatch = assetName.match(/^(.*?)(\(([^)]*)\))$/);
   if (suffixMatch) {
@@ -1567,6 +2101,13 @@ function accountName(value: unknown): string | undefined {
   }
 
   return stringField(value, "name") ?? stringField(value, "username") ?? stringField(value, "account") ?? stringField(value, "id");
+}
+
+function extractLoginUsername(payload: unknown): string | undefined {
+  if (!isPlainObject(payload)) {
+    return undefined;
+  }
+  return stringField(payload, "username") ?? stringField(payload, "email") ?? stringField(payload, "name");
 }
 
 function normalizeConnectionToken(payload: unknown): { id: string; expiresAt?: string; password?: string } {
@@ -1641,6 +2182,54 @@ function extractDatabaseGuideConnection(
   };
 }
 
+function extractHostSshConnection(
+  jmsUrl: string,
+  token: { id: string; password?: string },
+  input: {
+    asset: HostAsset;
+    accountUsername: string;
+    loginUsername?: string;
+  }
+): HostSshConnection | undefined {
+  const payload = decodeJmsClientUrl(jmsUrl);
+  if (!isPlainObject(payload)) {
+    return undefined;
+  }
+
+  const endpoint = plainObjectField(payload, "endpoint");
+  const tokenPayload = plainObjectField(payload, "token");
+  const host =
+    (endpoint ? stringField(endpoint, "host") : undefined) ??
+    stringField(payload, "host") ??
+    stringField(payload, "hostname");
+  const port =
+    (endpoint ? numberField(endpoint, "port") : undefined) ??
+    numberField(payload, "port") ??
+    DEFAULT_SSH_PORT;
+  const username = (tokenPayload ? stringField(tokenPayload, "id") : undefined) ?? stringField(payload, "id") ?? token.id;
+  const password =
+    (tokenPayload ? stringField(tokenPayload, "value") : undefined) ??
+    stringField(payload, "value") ??
+    token.password;
+
+  if (!host || !username) {
+    return undefined;
+  }
+
+  const accountCommandUsername = input.loginUsername
+    ? `${input.loginUsername}#${input.accountUsername}#${input.asset.id}`
+    : undefined;
+
+  return {
+    host,
+    port,
+    username,
+    ...(password ? { password } : {}),
+    command: formatSshCommand(username, host, port),
+    ...(accountCommandUsername ? { accountCommand: formatSshCommand(accountCommandUsername, host, port) } : {})
+  };
+}
+
 function decodeJmsClientUrl(jmsUrl: string): unknown {
   if (!jmsUrl.startsWith("jms://")) {
     return undefined;
@@ -1687,12 +2276,29 @@ function formatMysqlGuideCommand(host: string, port: number, username: string, p
   ].join(" ");
 }
 
+function formatSshCommand(username: string, host: string, port: number): string {
+  const normalizedHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return ["ssh", shellWord(`${username}@${normalizedHost}`), "-p", String(port)].join(" ");
+}
+
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+function shellWord(value: string): string {
+  return /^[A-Za-z0-9_@%+=:,./#\-[\]]+$/.test(value) ? value : shellQuote(value);
+}
+
 function formatDatabaseAssetOption(asset: DatabaseAsset): string {
   return asset.address ? `${asset.name} (${asset.address})` : asset.name;
+}
+
+function formatHostAssetOption(asset: HostAsset): string {
+  return asset.address ? `${asset.name} (${asset.address})` : asset.name;
+}
+
+function formatHostAccountOption(account: DatabasePermedAccount): string {
+  return account.alias === account.username ? account.username : `${account.username} (${account.alias})`;
 }
 
 const DATABASE_TOKEN_CACHE_NOTE =
@@ -1712,8 +2318,26 @@ function formatDatabaseTokenOutputs(
   return formatDatabaseTokenTables(outputs, options.jmsUrl === true, terminalColumns);
 }
 
+function formatHostTokenOutputs(
+  outputs: HostTokenOutput[],
+  options: HostTokenCommandOptions,
+  terminalColumns: number
+): string {
+  if (options.sshCommand) {
+    return formatHostTokenSshCommands(outputs);
+  }
+  if (options.json) {
+    return `${JSON.stringify(outputs, null, 2)}\n`;
+  }
+  return formatHostTokenTables(outputs, options.jmsUrl === true, terminalColumns);
+}
+
 function formatDatabaseTokenDsns(outputs: DatabaseTokenOutput[]): string {
   return `${outputs.map(requireDatabaseDsn).join("\n")}\n`;
+}
+
+function formatHostTokenSshCommands(outputs: HostTokenOutput[]): string {
+  return `${outputs.map(requireHostSshCommand).join("\n")}\n`;
 }
 
 function requireDatabaseDsn(output: DatabaseTokenOutput): string {
@@ -1721,6 +2345,13 @@ function requireDatabaseDsn(output: DatabaseTokenOutput): string {
     throw new Error(`无法生成 DSN: ${output.asset.name} 缺少 DB 向导连接信息`);
   }
   return output.dsn;
+}
+
+function requireHostSshCommand(output: HostTokenOutput): string {
+  if (!output.sshGuide) {
+    throw new Error(`无法生成 SSH 命令: ${output.asset.name} 缺少 SSH 向导连接信息`);
+  }
+  return output.sshGuide.command;
 }
 
 function formatDatabaseDsn(protocol: string, guide: DatabaseGuideConnection): string {
@@ -1735,6 +2366,15 @@ function formatDatabaseTokenTables(
 ): string {
   const separator = formatDatabaseTokenOutputSeparator(terminalColumns);
   return `${outputs.map((output) => formatDatabaseTokenTable(output, includeJmsUrl, terminalColumns)).join(`\n\n${separator}\n\n`)}\n`;
+}
+
+function formatHostTokenTables(
+  outputs: HostTokenOutput[],
+  includeJmsUrl: boolean,
+  terminalColumns: number
+): string {
+  const separator = formatDatabaseTokenOutputSeparator(terminalColumns);
+  return `${outputs.map((output) => formatHostTokenTable(output, includeJmsUrl, terminalColumns)).join(`\n\n${separator}\n\n`)}\n`;
 }
 
 function formatDatabaseTokenTable(output: DatabaseTokenOutput, includeJmsUrl: boolean, terminalColumns: number): string {
@@ -1755,7 +2395,31 @@ function formatDatabaseTokenTable(output: DatabaseTokenOutput, includeJmsUrl: bo
   return formatKeyValueTable(rows, terminalColumns);
 }
 
+function formatHostTokenTable(output: HostTokenOutput, includeJmsUrl: boolean, terminalColumns: number): string {
+  const rows: Array<[string, string]> = [
+    ["名称", formatHostDisplayName(output.asset)],
+    ["主机", formatTableValue(output.sshGuide?.host)],
+    ["端口", formatTableValue(output.sshGuide?.port)],
+    ["用户名", formatTableValue(output.sshGuide?.username)],
+    ["密码", formatTableValue(output.sshGuide?.password ?? output.password)],
+    ["协议", output.protocol],
+    ["过期时间", formatTableValue(output.expiresAt)],
+    ["开启复用", output.reusable ? "是" : "否"],
+    ["连接命令行", output.sshGuide?.command ?? "无法解析连接命令"],
+    ...(output.sshGuide?.accountCommand
+      ? [["资产账号命令", output.sshGuide.accountCommand] as [string, string]]
+      : []),
+    ["说明", "Token 命令密码是表格中的密码；资产账号命令密码是 JumpServer 登录密码"],
+    ...(includeJmsUrl ? [["JMS 连接地址", formatTableValue(output.jmsUrl)] as [string, string]] : [])
+  ];
+  return formatKeyValueTable(rows, terminalColumns);
+}
+
 function formatDatabaseDisplayName(asset: DatabaseTokenOutput["asset"]): string {
+  return asset.address ? `${asset.name} (${asset.address})` : asset.name;
+}
+
+function formatHostDisplayName(asset: HostTokenOutput["asset"]): string {
   return asset.address ? `${asset.name} (${asset.address})` : asset.name;
 }
 
@@ -2323,6 +2987,54 @@ function formatParameters(parameters: ApiOperation["queryParameters"]): string {
   return parameters.map((parameter) => `${parameter.name}${parameter.required ? " (required)" : ""}`).join(", ");
 }
 
+type SearchableMultiselectOptions<T> = Parameters<typeof clackMultiselect<T>>[0];
+type SearchableMultiselectResult<T> = Awaited<ReturnType<typeof clackMultiselect<T>>> | typeof ASSET_SEARCH_SHORTCUT;
+type KeypressInfo = {
+  name?: string;
+  sequence?: string;
+  ctrl?: boolean;
+  meta?: boolean;
+};
+
+async function searchableClackMultiselect<T>(
+  options: SearchableMultiselectOptions<T>
+): Promise<SearchableMultiselectResult<T>> {
+  const abortController = new AbortController();
+  const promptInput = options.input ?? stdin;
+  let searchRequested = false;
+  const keypressListener = (char: string | undefined, key: KeypressInfo = {}) => {
+    if (!isAssetSearchShortcutKey(char, key)) {
+      return;
+    }
+    searchRequested = true;
+    abortController.abort();
+  };
+
+  promptInput.on("keypress", keypressListener);
+  try {
+    const signal = options.signal
+      ? AbortSignal.any([options.signal, abortController.signal])
+      : abortController.signal;
+    const result = await clackMultiselect<T>({
+      ...options,
+      signal
+    });
+    if (searchRequested && isCancel(result)) {
+      return ASSET_SEARCH_SHORTCUT;
+    }
+    return result;
+  } finally {
+    promptInput.removeListener("keypress", keypressListener);
+  }
+}
+
+function isAssetSearchShortcutKey(char: string | undefined, key: KeypressInfo): boolean {
+  if (key.ctrl || key.meta) {
+    return false;
+  }
+  return char === "/" || key.sequence === "/" || key.name === "slash";
+}
+
 async function selectFromTerminal<T>(message: string, choices: Array<SelectChoice<T>>): Promise<T> {
   if (choices.length === 0) {
     throw new Error("Cannot select from an empty list.");
@@ -2433,7 +3145,7 @@ async function selectDatabaseAssetsWithClack(
   const pageLabel = totalPages === undefined ? `${pageIndex + 1}` : `${pageIndex + 1}/${totalPages}`;
   const countLabel = page.count === undefined ? `${loadedCount}` : `${Math.min(loadedCount, page.count)}/${page.count}`;
   const selectedCountLabel = selectedAssets.size === 0 ? "未选择" : `已选择 ${selectedAssets.size}`;
-  const promptMessage = `${message}  搜索: ${query || "(空)"}  页: ${pageLabel}  已加载: ${countLabel}  ${selectedCountLabel}`;
+  const promptMessage = `${message}  搜索: ${query || "(空)"}  页: ${pageLabel}  已加载: ${countLabel}  ${selectedCountLabel}  按 / 搜索`;
   const initialValues = page.items.filter((asset) => selectedAssets.has(asset.id));
   const navigationChoices: Array<SelectChoice<DatabaseAssetNavigationChoice>> = [
     ...(pageIndex > 0
@@ -2464,15 +3176,20 @@ async function selectDatabaseAssetsWithClack(
     })),
     ...navigationChoices
   ];
-  const selected = await clackMultiselect<DatabaseAsset | DatabaseAssetNavigationChoice>({
+  const selected = await searchableClackMultiselect<DatabaseAsset | DatabaseAssetNavigationChoice>({
     message: promptMessage,
-    options: choices as Parameters<typeof clackMultiselect<DatabaseAsset | DatabaseAssetNavigationChoice>>[0]["options"],
+    options: choices as Parameters<typeof searchableClackMultiselect<DatabaseAsset | DatabaseAssetNavigationChoice>>[0]["options"],
     initialValues,
     input: stdin,
     output: processStderr,
     maxItems: 20,
     required: false
   });
+
+  if (selected === ASSET_SEARCH_SHORTCUT) {
+    clearSubmittedPromptDisplay(processStderr, promptMessage, "/");
+    return [{ type: "search" }];
+  }
 
   if (isCancel(selected)) {
     clackCancel("已取消选择", { output: processStderr });
@@ -2505,6 +3222,165 @@ async function promptDatabaseAssetSearch(currentSearch: string | undefined, mess
   return nextSearch.trim() || undefined;
 }
 
+async function selectHostAssetFromTerminal(
+  message: string,
+  input: HostAssetSelectionInput
+): Promise<HostAsset[]> {
+  if (!stdin.isTTY) {
+    throw new Error("Cannot select a host asset because stdin is not an interactive terminal.");
+  }
+
+  let query = input.initialSearch;
+  let pageIndex = 0;
+  const offsets = [0];
+  const selectedAssets = new Map<string, HostAsset>();
+
+  while (true) {
+    const offset = offsets[pageIndex] ?? pageIndex * input.pageSize;
+    const page = await input.fetchPage(query, offset);
+    offsets[pageIndex] = offset;
+    offsets[pageIndex + 1] = page.nextOffset;
+
+    if (page.items.length === 0) {
+      query = await promptHostAssetSearch(query, "没有匹配的主机，请输入新的搜索关键词");
+      pageIndex = 0;
+      offsets.length = 1;
+      offsets[0] = 0;
+      continue;
+    }
+
+    const pageSelection = await selectHostAssetsWithClack(
+      message,
+      query,
+      pageIndex,
+      page,
+      input.pageSize,
+      selectedAssets
+    );
+    const selectedPageAssets = pageSelection.filter(isHostAsset);
+    const pageSelectionIds = new Set(selectedPageAssets.map((asset) => asset.id));
+    for (const asset of page.items) {
+      if (pageSelectionIds.has(asset.id)) {
+        selectedAssets.set(asset.id, asset);
+      } else {
+        selectedAssets.delete(asset.id);
+      }
+    }
+
+    const action = pageSelection.find(isHostAssetNavigationChoice);
+    if (action?.type === "previous") {
+      pageIndex = Math.max(0, pageIndex - 1);
+    } else if (action?.type === "next") {
+      pageIndex += 1;
+    } else if (action?.type === "search") {
+      query = await promptHostAssetSearch(query, "搜索主机");
+      pageIndex = 0;
+      offsets.length = 1;
+      offsets[0] = 0;
+      continue;
+    } else {
+      if (selectedAssets.size === 0) {
+        throw new Error("至少选择一个主机");
+      }
+      return [...selectedAssets.values()];
+    }
+  }
+}
+
+interface HostAssetNavigationChoice {
+  type: "previous" | "next" | "search";
+}
+
+async function selectHostAssetsWithClack(
+  message: string,
+  query: string | undefined,
+  pageIndex: number,
+  page: HostAssetPage,
+  pageSize: number,
+  selectedAssets: ReadonlyMap<string, HostAsset>
+): Promise<Array<HostAsset | HostAssetNavigationChoice>> {
+  const loadedCount = page.nextOffset;
+  const totalPages = page.count === undefined ? undefined : Math.max(1, Math.ceil(page.count / pageSize));
+  const pageLabel = totalPages === undefined ? `${pageIndex + 1}` : `${pageIndex + 1}/${totalPages}`;
+  const countLabel = page.count === undefined ? `${loadedCount}` : `${Math.min(loadedCount, page.count)}/${page.count}`;
+  const selectedCountLabel = selectedAssets.size === 0 ? "未选择" : `已选择 ${selectedAssets.size}`;
+  const promptMessage = `${message}  搜索: ${query || "(空)"}  页: ${pageLabel}  已加载: ${countLabel}  ${selectedCountLabel}  按 / 搜索`;
+  const initialValues = page.items.filter((asset) => selectedAssets.has(asset.id));
+  const navigationChoices: Array<SelectChoice<HostAssetNavigationChoice>> = [
+    ...(pageIndex > 0
+      ? [
+          {
+            label: "上一页",
+            value: { type: "previous" } as HostAssetNavigationChoice
+          }
+        ]
+      : []),
+    ...(page.hasMore
+      ? [
+          {
+            label: "下一页",
+            value: { type: "next" } as HostAssetNavigationChoice
+          }
+        ]
+      : []),
+    {
+      label: "重新搜索",
+      value: { type: "search" }
+    }
+  ];
+  const choices: Array<SelectChoice<HostAsset | HostAssetNavigationChoice>> = [
+    ...page.items.map((asset) => ({
+      label: formatHostAssetOption(asset),
+      value: asset
+    })),
+    ...navigationChoices
+  ];
+  const selected = await searchableClackMultiselect<HostAsset | HostAssetNavigationChoice>({
+    message: promptMessage,
+    options: choices as Parameters<typeof searchableClackMultiselect<HostAsset | HostAssetNavigationChoice>>[0]["options"],
+    initialValues,
+    input: stdin,
+    output: processStderr,
+    maxItems: 20,
+    required: false
+  });
+
+  if (selected === ASSET_SEARCH_SHORTCUT) {
+    clearSubmittedPromptDisplay(processStderr, promptMessage, "/");
+    return [{ type: "search" }];
+  }
+
+  if (isCancel(selected)) {
+    clackCancel("已取消选择", { output: processStderr });
+    throw new Error("已取消选择");
+  }
+
+  clearSubmittedPromptDisplay(
+    processStderr,
+    promptMessage,
+    selected.map((value) => choiceLabelForValue(choices, value)).join(", ") || "none"
+  );
+  return selected;
+}
+
+async function promptHostAssetSearch(currentSearch: string | undefined, message: string): Promise<string | undefined> {
+  const nextSearch = await clackText({
+    message,
+    initialValue: currentSearch ?? "",
+    placeholder: "输入主机名称关键词",
+    input: stdin,
+    output: processStderr
+  });
+
+  if (isCancel(nextSearch)) {
+    clackCancel("已取消选择", { output: processStderr });
+    throw new Error("已取消选择");
+  }
+
+  clearSubmittedPromptDisplay(processStderr, message, nextSearch.trim());
+  return nextSearch.trim() || undefined;
+}
+
 function isDatabaseAssetNavigationChoice(value: unknown): value is DatabaseAssetNavigationChoice {
   return isPlainObject(value) && (
     value.type === "previous" ||
@@ -2513,7 +3389,19 @@ function isDatabaseAssetNavigationChoice(value: unknown): value is DatabaseAsset
   );
 }
 
+function isHostAssetNavigationChoice(value: unknown): value is HostAssetNavigationChoice {
+  return isPlainObject(value) && (
+    value.type === "previous" ||
+    value.type === "next" ||
+    value.type === "search"
+  );
+}
+
 function isDatabaseAsset(value: unknown): value is DatabaseAsset {
+  return isPlainObject(value) && typeof value.id === "string" && typeof value.name === "string";
+}
+
+function isHostAsset(value: unknown): value is HostAsset {
   return isPlainObject(value) && typeof value.id === "string" && typeof value.name === "string";
 }
 
