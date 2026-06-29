@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import {
   cancel as clackCancel,
   confirm as clackConfirm,
@@ -90,6 +90,7 @@ interface RequestCommandOptions {
   dryRun?: boolean;
   includeHeaders?: boolean;
   json?: boolean;
+  [key: string]: unknown;
 }
 
 interface LoginCommandOptions {
@@ -267,6 +268,26 @@ const GROUP_DESCRIPTIONS = new Map<string, string>([
 const RESOURCE_LABELS_BY_TAG = new Map<string, string>([
   ["assets_assets", "Asset records"]
 ]);
+const RESERVED_REQUEST_OPTION_FLAGS = new Set([
+  "param",
+  "path",
+  "query",
+  "header",
+  "limit",
+  "offset",
+  "body",
+  "dry-run",
+  "include-headers",
+  "json"
+]);
+const DEPRECATED_QUERY_OPTION_WARNING =
+  "警告: --query name=value 已弃用，将在下个版本删除；请改用具体子命令的直接 query 选项，例如 --search value。\n";
+
+interface QueryOptionBinding {
+  parameterName: string;
+  flagName: string;
+  attributeName: string;
+}
 
 function resolveBaseUrl(host: string): string {
   return host.includes("://") ? host : `https://${host}`;
@@ -492,6 +513,7 @@ function registerOperationCommands(parent: Command, operations: ApiOperation[], 
       await runOperation(operation, commandOptions, command, context);
     });
     addRequestOptions(operationCommand);
+    addOperationQueryOptions(operationCommand, operation);
     operationCommand.addHelpText("after", operationHelpDetails(operation));
   }
 }
@@ -640,9 +662,19 @@ function exampleArguments(operation: ApiOperation): string {
     parts.push(`--path ${parameter.name}=value`);
   }
 
-  const query = operation.queryParameters.find((parameter) => parameter.name === "search") ?? operation.queryParameters[0];
-  if (query) {
-    parts.push(`--query ${query.name}=value`);
+  const queryOptions = operationQueryOptionBindings(operation);
+  const queryOption = queryOptions.find((option) => option.parameterName === "search") ?? queryOptions[0];
+  if (queryOption) {
+    parts.push(`--${queryOption.flagName} value`);
+  } else if (operation.queryParameters.some((parameter) => parameter.name === "limit")) {
+    parts.push("--limit 20");
+  } else if (operation.queryParameters.some((parameter) => parameter.name === "offset")) {
+    parts.push("--offset 0");
+  } else {
+    const query = operation.queryParameters[0];
+    if (query) {
+      parts.push(`--query ${query.name}=value`);
+    }
   }
 
   if (operation.bodySchema) {
@@ -857,6 +889,7 @@ async function runOperation(
   try {
     const globalOptions = resolveGlobalOptions(command, context);
     const host = resolveRequiredHost(globalOptions.host);
+    warnDeprecatedQueryOption(commandOptions, context);
     const requestValues = collectRequestValues(operation, commandOptions);
     const planInput = {
       operation,
@@ -2487,7 +2520,7 @@ function addRequestOptions(command: Command): void {
   command
     .option("-p, --param <name=value>", "Path parameter if the name is in the path template, otherwise query", collect, [])
     .option("--path <name=value>", "Path parameter value", collect, [])
-    .option("-q, --query <name=value>", "Query parameter value", collect, [])
+    .option("-q, --query <name=value>", "Deprecated; use operation-specific query options instead", collect, [])
     .option("-H, --header <name=value>", "Extra request header", collect, [])
     .option("--limit <number>", "Number of results to return for limit/offset paginated APIs")
     .option("--offset <number>", "Initial result offset for limit/offset paginated APIs")
@@ -2495,6 +2528,47 @@ function addRequestOptions(command: Command): void {
     .option("--dry-run", "Print a concise request preview without sending it")
     .option("--include-headers", "Include response status and headers in output")
     .option("--json", "Print raw JSON response");
+}
+
+function warnDeprecatedQueryOption(options: RequestCommandOptions, context: RunContext): void {
+  if ((options.query ?? []).length > 0) {
+    context.stderr(DEPRECATED_QUERY_OPTION_WARNING);
+  }
+}
+
+function addOperationQueryOptions(command: Command, operation: ApiOperation): void {
+  for (const binding of operationQueryOptionBindings(operation)) {
+    command.addOption(new Option(`--${binding.flagName} <value>`, `Query parameter: ${binding.parameterName}`));
+  }
+}
+
+function operationQueryOptionBindings(operation: ApiOperation): QueryOptionBinding[] {
+  const usedFlagNames = new Set(RESERVED_REQUEST_OPTION_FLAGS);
+  const bindings: QueryOptionBinding[] = [];
+
+  for (const parameter of operation.queryParameters) {
+    const flagName = queryParameterFlagName(parameter.name);
+    if (!flagName || usedFlagNames.has(flagName)) {
+      continue;
+    }
+
+    usedFlagNames.add(flagName);
+    bindings.push({
+      parameterName: parameter.name,
+      flagName,
+      attributeName: new Option(`--${flagName} <value>`).attributeName()
+    });
+  }
+
+  return bindings;
+}
+
+function queryParameterFlagName(parameterName: string): string | undefined {
+  const flagName = parameterName
+    .replace(/[^A-Za-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+  return flagName.length > 0 ? flagName : undefined;
 }
 
 function collect(value: string, previous: string[]): string[] {
@@ -2525,6 +2599,7 @@ function collectRequestValues(
 
   Object.assign(pathValues, Object.fromEntries(parsePairs(options.path ?? [])));
   Object.assign(queryValues, Object.fromEntries(parsePairs(options.query ?? [])));
+  Object.assign(queryValues, collectOperationQueryOptionValues(operation, options));
   applyPaginationShortcut(operation, queryParameterNames, queryValues, "limit", options.limit);
   applyPaginationShortcut(operation, queryParameterNames, queryValues, "offset", options.offset);
 
@@ -2533,6 +2608,22 @@ function collectRequestValues(
     queryValues,
     headers: Object.fromEntries(parsePairs(options.header ?? []))
   };
+}
+
+function collectOperationQueryOptionValues(
+  operation: ApiOperation,
+  options: RequestCommandOptions
+): Record<string, QueryValue> {
+  const values: Record<string, QueryValue> = {};
+
+  for (const binding of operationQueryOptionBindings(operation)) {
+    const value = options[binding.attributeName];
+    if (value !== undefined) {
+      values[binding.parameterName] = String(value);
+    }
+  }
+
+  return values;
 }
 
 function applyPaginationShortcut(
@@ -2547,7 +2638,7 @@ function applyPaginationShortcut(
   }
 
   if (!queryParameterNames.has(name)) {
-    throw new Error(`${operation.operationId} does not support --${name}. Use --query ${name}=... only if the API accepts it.`);
+    throw new Error(`${operation.operationId} does not support --${name}. This API does not declare the ${name} query parameter.`);
   }
 
   if (!/^\d+$/.test(value)) {

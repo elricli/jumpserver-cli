@@ -280,8 +280,12 @@ describe("CLI command surface", () => {
     expect(help).not.toContain("/api/v1/assets/databases/suggestions/");
     expect(help).toContain("Query params: id, name, address, is_active");
     expect(help).toContain("Body: none");
+    expect(help).toContain("--name <value>");
+    expect(help).toContain("--is-active <value>");
+    expect(help).toContain("-q, --query <name=value>");
+    expect(help).toContain("Deprecated");
     expect(help).toContain("Example:");
-    expect(help).toContain("jms assets databases match --query search=value");
+    expect(help).toContain("jms assets databases match --search value");
   });
 
   it("prints SSH connection tables for selected host token credentials by default", async () => {
@@ -2052,7 +2056,8 @@ describe("CLI command surface", () => {
       { from: "node" }
     );
 
-    expect(stderr).toEqual([]);
+    expect(stderr.join("")).toContain("--query name=value 已弃用");
+    expect(stderr.join("")).toContain("下个版本删除");
     expect(stdout.join("")).toBe(
       [
         "请求预览",
@@ -2066,6 +2071,62 @@ describe("CLI command surface", () => {
     );
     expect(stdout.join("")).not.toContain("Signature");
     expect(stdout.join("")).not.toContain("secret");
+  });
+
+  it("accepts declared query parameters as direct operation command options", async () => {
+    const cases: Array<{ commandPath: string[]; expectedPath: string }> = [
+      {
+        commandPath: ["assets", "match"],
+        expectedPath: "/api/v1/assets/assets/suggestions/"
+      },
+      {
+        commandPath: ["assets", "databases", "match"],
+        expectedPath: "/api/v1/assets/databases/suggestions/"
+      },
+      {
+        commandPath: ["assets", "hosts", "match"],
+        expectedPath: "/api/v1/assets/hosts/suggestions/"
+      }
+    ];
+
+    for (const { commandPath, expectedPath } of cases) {
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      const program = buildTestProgram({
+        stdout: (value) => stdout.push(value),
+        stderr: (value) => stderr.push(value)
+      });
+
+      await program.parseAsync(
+        [
+          "node",
+          "jms",
+          "--host",
+          "https://jumpserver.example.test",
+          "--token",
+          "token",
+          ...commandPath,
+          "--name",
+          "web",
+          "--address=10.0",
+          "--platform",
+          "Linux",
+          "--is-active",
+          "true",
+          "--limit",
+          "20",
+          "--offset",
+          "0",
+          "--dry-run"
+        ],
+        { from: "node" }
+      );
+
+      expect(stderr, commandPath.join(" ")).toEqual([]);
+      expect(stdout.join(""), commandPath.join(" ")).toContain(
+        `地址: https://jumpserver.example.test${expectedPath}?name=web&address=10.0&is_active=true&platform=Linux&limit=20&offset=0`
+      );
+    }
   });
 
   it("supports limit and offset pagination shortcuts for paginated operations", async () => {

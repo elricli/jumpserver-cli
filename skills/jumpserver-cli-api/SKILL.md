@@ -20,6 +20,7 @@ Prefer module commands when they exist:
 
 ```bash
 jms users profile read
+jms assets match --name web --address 10.0 --platform Linux --limit 20
 jms assets favorite-assets read --path id=asset-1
 jms users profile password update --body '{"old_password":"old","new_password":"new","new_password_again":"new"}'
 ```
@@ -33,7 +34,8 @@ jms api call assets_favorite-assets_read --path id=asset-1
 ## Request Options
 
 - `--path name=value`: path template parameter.
-- `--query name=value`: query string parameter.
+- `--search value`, `--name value`, and other operation-specific options: query parameters declared by that OpenAPI operation.
+- `--query name=value`: deprecated legacy query syntax; it prints a warning and will be removed in the next version.
 - `--param name=value`: path parameter if declared, otherwise query parameter.
 - `--limit 20` and `--offset 40`: pagination controls.
 - `--body '{"name":"value"}'`, `--body @payload.json`, or `--body -`.

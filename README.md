@@ -86,7 +86,7 @@ npm run build
 npx tsx src/cli.ts api list --search profile
 npx tsx src/cli.ts api describe users_profile_read
 npx tsx src/cli.ts users profile read --dry-run
-npx tsx src/cli.ts assets favorite-assets read --path id=asset-1 --query search=prod --dry-run
+npx tsx src/cli.ts assets match --name web --address=10.0 --platform Linux --limit 20 --dry-run
 ```
 
 `auth token` supports both interactive prompts and argument-driven usage:
@@ -120,7 +120,8 @@ API calls print successful JSON arrays and paginated `results` as ASCII tables b
 Request options:
 
 - `--path name=value`: path template parameter.
-- `--query name=value`: query string parameter.
+- `--search value`, `--name value`, and other operation-specific options: query parameters declared by that OpenAPI operation.
+- `--query name=value`: deprecated legacy query syntax; it prints a warning and will be removed in the next version.
 - `--param name=value`: path parameter if the name appears in the path template, otherwise query parameter.
 - `--limit 20`: result count for APIs that declare limit/offset pagination.
 - `--offset 40`: starting result offset for APIs that declare limit/offset pagination.
