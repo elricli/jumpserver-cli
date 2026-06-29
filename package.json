@@ -1,6 +1,6 @@
 {
   "name": "jumpserver-cli",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "OpenAPI-driven CLI for JumpServer.",
   "type": "module",
   "license": "MIT",
