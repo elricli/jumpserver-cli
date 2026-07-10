@@ -5,7 +5,7 @@ import {
   readPackageVersion
 } from "../src/cli.js";
 import { operationCommandPath } from "../src/operation-command.js";
-import { loadOperations } from "../src/openapi.js";
+import { loadOperations, type ApiOperation } from "../src/openapi.js";
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2131,6 +2131,51 @@ describe("CLI command surface", () => {
         `地址: https://jumpserver.example.test${expectedPath}?name=web&address=10.0&is_active=true&platform=Linux&limit=20&offset=0`
       );
     }
+  });
+
+  it("exposes camelCase query parameters as kebab-case flags on concrete commands", async () => {
+    const operation: ApiOperation = {
+      method: "GET",
+      path: "/examples/",
+      basePath: "/api/v1",
+      operationId: "examples_list",
+      tag: "examples",
+      summary: "List examples",
+      queryParameters: [{ name: "isActive", required: false }],
+      pathParameters: []
+    };
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const program = buildTestProgram({
+      operations: [operation],
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value)
+    });
+    const command = findCommandPath(program, ["examples", "list"]);
+
+    expect(optionFlags(command)).toContain("--is-active <value>");
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "token",
+        "examples",
+        "list",
+        "--is-active",
+        "true",
+        "--dry-run"
+      ],
+      { from: "node" }
+    );
+
+    expect(stderr).toEqual([]);
+    expect(stdout.join("")).toContain(
+      "地址: https://jumpserver.example.test/api/v1/examples/?isActive=true"
+    );
   });
 
   it("keeps inherited global options separate from colliding operation query options", async () => {
