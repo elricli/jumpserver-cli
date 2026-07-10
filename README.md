@@ -76,6 +76,7 @@ Successful `auth token` also persists the host and returned Bearer token. The co
 3. `~/.config/jms/config.json`
 
 Runtime precedence is: command-line flags, environment variables, then saved config. A host is required unless it has already been saved by `auth token` or `auth access-key`.
+Authentication is resolved as one complete mode from the highest-priority source that provides credentials. Access Key fields are never combined across sources, and incomplete or conflicting modes fail with an explicit error.
 
 ## Usage
 
@@ -121,6 +122,7 @@ Request options:
 
 - `--path name=value`: path template parameter.
 - `--search value`, `--name value`, and other operation-specific options: query parameters declared by that OpenAPI operation.
+- `--query-host value` and similar `--query-*` options: query parameters whose names conflict with global or request options.
 - `--query name=value`: deprecated legacy query syntax; it prints a warning and will be removed in the next version.
 - `--param name=value`: path parameter if the name appears in the path template, otherwise query parameter.
 - `--limit 20`: result count for APIs that declare limit/offset pagination.
@@ -154,6 +156,7 @@ jms assets hosts token --all --limit 50
 `assets hosts token` uses JumpServer's SSH Guide connection method (`ssh_guide`). The default table includes the temporary Token SSH command, and when the current profile username is available it also prints the direct asset/account username command. Use `--login-username` to override the JumpServer login username used in that direct command.
 
 In interactive database and host asset selectors, press `/` to enter a new search term. The selector reloads results from JumpServer with that search query instead of filtering only the currently loaded page.
+Asset name arguments support case-insensitive substrings plus `*` and `?` glob patterns. Glob patterns are applied to the complete asset name after server-side search, including with `--all`.
 
 ## Verification
 
@@ -167,6 +170,8 @@ The raw Swagger/OpenAPI export is intentionally not tracked or published. If you
 ```bash
 npm run generate:operations
 ```
+
+When `api.json` is present, `npm run coverage:api` compares its complete normalized operation semantics with the generated catalog. Without the raw document it reports API catalog status as `not-checked` and verifies only generated command coverage.
 
 To test locally without touching your real config:
 

@@ -35,9 +35,10 @@ jms api call assets_favorite-assets_read --path id=asset-1
 
 - `--path name=value`: path template parameter.
 - `--search value`, `--name value`, and other operation-specific options: query parameters declared by that OpenAPI operation.
+- `--query-host value` and similar `--query-*` options: query parameters whose names conflict with global or request options.
 - `--query name=value`: deprecated legacy query syntax; it prints a warning and will be removed in the next version.
 - `--param name=value`: path parameter if declared, otherwise query parameter.
-- `--limit 20` and `--offset 40`: pagination controls.
+- `--limit 20` and `--offset 40`: pagination controls shown only for operations that declare them.
 - `--body '{"name":"value"}'`, `--body @payload.json`, or `--body -`.
 - `--dry-run`: inspect the request without sending it.
 - `--json`: print raw JSON instead of the compact table.
