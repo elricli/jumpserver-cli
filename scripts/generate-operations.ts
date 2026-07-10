@@ -1,19 +1,11 @@
-import { writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadOperations, resolveApiJsonPath } from "../src/openapi.js";
+import { resolveApiJsonPath } from "../src/openapi-parser.js";
+import { generateOperationCatalog } from "../src/openapi-toolchain.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outputPath = resolve(root, "src/generated-operations.ts");
-const operations = loadOperations(resolveApiJsonPath());
-const content = [
-  'import type { ApiOperation } from "./openapi.js";',
-  "",
-  `export const operations: ApiOperation[] = ${JSON.stringify(operations, null, 2)};`,
-  ""
-].join("\n");
-
-await writeFile(outputPath, content);
+const operations = await generateOperationCatalog(resolveApiJsonPath(), outputPath);
 console.log(
   JSON.stringify(
     {

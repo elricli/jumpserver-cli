@@ -21,6 +21,11 @@ import {
   buildSignedHeaders
 } from "./auth.js";
 import {
+  resolveAuthenticationMode,
+  type CredentialSource,
+  type AuthenticationMode
+} from "./authentication-mode.js";
+import {
   accessKeyConfig,
   loadConfig,
   resolveConfigPath,
@@ -29,7 +34,30 @@ import {
   type CliConfig
 } from "./config.js";
 import { type ApiOperation, findOperation, loadOperations } from "./openapi.js";
-import { createRequestPlan, type QueryValue, type RequestPlan } from "./request.js";
+import {
+  operationCommandPath,
+  operationQueryOptionBindings
+} from "./operation-command.js";
+import {
+  createRequestPlan,
+  mergeHeadersCaseInsensitive,
+  type QueryValue,
+  type RequestPlan
+} from "./request.js";
+import {
+  selectPermittedAssets,
+  type PermittedAsset,
+  type PermittedAssetPage,
+  type PermittedAssetPageSelection,
+  type PermittedAssetSelectionInput,
+  type PermittedAssetSelectionView
+} from "./permitted-asset-selection.js";
+
+export type {
+  PermittedAsset,
+  PermittedAssetPage,
+  PermittedAssetSelectionInput
+} from "./permitted-asset-selection.js";
 
 type Fetcher = typeof fetch;
 export type Prompt = (message: string, options?: { secret?: boolean }) => Promise<string>;
@@ -40,18 +68,16 @@ export interface SelectChoice<T> {
   value: T;
 }
 export type SelectPrompt = <T>(message: string, choices: Array<SelectChoice<T>>) => Promise<T>;
-export interface DatabaseAssetSelectionInput {
-  initialSearch?: string;
-  pageSize: number;
-  fetchPage: (search: string | undefined, offset: number) => Promise<DatabaseAssetPage>;
-}
-export type DatabaseAssetSelectPrompt = (message: string, input: DatabaseAssetSelectionInput) => Promise<DatabaseAsset[]>;
-export interface HostAssetSelectionInput {
-  initialSearch?: string;
-  pageSize: number;
-  fetchPage: (search: string | undefined, offset: number) => Promise<HostAssetPage>;
-}
-export type HostAssetSelectPrompt = (message: string, input: HostAssetSelectionInput) => Promise<HostAsset[]>;
+export type PermittedAssetSelectPrompt<TPermittedAsset extends PermittedAsset = PermittedAsset> =
+  (message: string, input: PermittedAssetSelectionInput<TPermittedAsset>) => Promise<TPermittedAsset[]>;
+export type DatabaseAsset = PermittedAsset;
+export type DatabaseAssetPage = PermittedAssetPage<DatabaseAsset>;
+export type DatabaseAssetSelectionInput = PermittedAssetSelectionInput<DatabaseAsset>;
+export type DatabaseAssetSelectPrompt = PermittedAssetSelectPrompt<DatabaseAsset>;
+export type HostAsset = PermittedAsset;
+export type HostAssetPage = PermittedAssetPage<HostAsset>;
+export type HostAssetSelectionInput = PermittedAssetSelectionInput<HostAsset>;
+export type HostAssetSelectPrompt = PermittedAssetSelectPrompt<HostAsset>;
 
 export interface BuildProgramOptions {
   operations?: ApiOperation[];
@@ -70,14 +96,18 @@ export interface BuildProgramOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-interface GlobalOptions {
+interface CommandGlobalOptions extends CredentialSource {
   host?: string;
-  accessKeyId?: string;
-  accessKeySecret?: string;
-  token?: string;
-  privateToken?: string;
   org?: string;
 }
+
+interface GlobalOptions {
+  host?: string;
+  org?: string;
+  authenticationMode: AuthenticationMode;
+}
+
+type ConnectionOptions = Omit<GlobalOptions, "authenticationMode">;
 
 interface RequestCommandOptions {
   param?: string[];
@@ -136,13 +166,38 @@ interface HostTokenCommandOptions {
   reusable?: boolean;
 }
 
+type PermittedAssetCategory = "database" | "host";
+
+interface PermittedAssetSelectionPolicy {
+  category: PermittedAssetCategory;
+  name: string;
+  terminalName: string;
+  searchPlaceholder: string;
+}
+
+interface ConnectionTokenCommandOptions {
+  all?: boolean;
+  limit?: string;
+  reusable?: boolean;
+}
+
+interface ConnectionTokenWorkflow<TOptions extends ConnectionTokenCommandOptions, TPrepared, TOutput> {
+  pattern: string | undefined;
+  options: TOptions;
+  command: Command;
+  context: InteractiveRunContext;
+  policy: PermittedAssetSelectionPolicy;
+  selectAssets: PermittedAssetSelectPrompt;
+  prepare: () => Promise<TPrepared>;
+  createOutput: (asset: PermittedAsset, reusable: boolean, prepared: TPrepared) => Promise<TOutput>;
+  formatOutputs: (outputs: TOutput[]) => string;
+}
+
 const AUTH_COMPLETE_MESSAGE = "认证完成";
-const DEFAULT_DATABASE_TOKEN_LIMIT = 20;
+const DEFAULT_ASSET_TOKEN_LIMIT = 20;
 const DEFAULT_DATABASE_CONNECT_METHOD = "db_guide";
-const DEFAULT_DATABASE_REUSABLE = false;
-const DEFAULT_HOST_TOKEN_LIMIT = 20;
 const DEFAULT_HOST_CONNECT_METHOD = "ssh_guide";
-const DEFAULT_HOST_REUSABLE = false;
+const DEFAULT_REUSABLE = false;
 const DEFAULT_SSH_PORT = 2222;
 const DEFAULT_TERMINAL_COLUMNS = 120;
 const MIN_DATABASE_TABLE_VALUE_WIDTH = 12;
@@ -154,45 +209,37 @@ const DEFAULT_DATABASE_CONNECT_OPTIONS = {
   backspaceAsCtrlH: false,
   appletConnectMethod: "web"
 };
-const PERMED_DATABASE_ASSETS_OPERATION: ApiOperation = {
+const PERMITTED_ASSETS_OPERATION: ApiOperation = {
   method: "GET",
   path: "/perms/users/self/assets/",
   basePath: "/api/v1",
-  operationId: "perms_users_self_database_assets_list",
+  operationId: "perms_users_self_assets_list",
   tag: "perms_users",
-  summary: "List current user's permitted database assets",
+  summary: "List current user's permitted assets",
   queryParameters: [],
   pathParameters: []
 };
-const PERMED_DATABASE_ASSET_DETAIL_OPERATION: ApiOperation = {
+const PERMITTED_ASSET_DETAIL_OPERATION: ApiOperation = {
   method: "GET",
   path: "/perms/users/self/assets/{id}/",
   basePath: "/api/v1",
-  operationId: "perms_users_self_database_asset_read",
+  operationId: "perms_users_self_asset_read",
   tag: "perms_users",
-  summary: "Read current user's permitted database asset detail",
+  summary: "Read current user's permitted asset detail",
   queryParameters: [],
   pathParameters: [{ name: "id", required: true, schema: { type: "string" } }]
 };
-const PERMED_HOST_ASSETS_OPERATION: ApiOperation = {
-  method: "GET",
-  path: "/perms/users/self/assets/",
-  basePath: "/api/v1",
-  operationId: "perms_users_self_host_assets_list",
-  tag: "perms_users",
-  summary: "List current user's permitted host assets",
-  queryParameters: [],
-  pathParameters: []
+const DATABASE_PERMITTED_ASSET_POLICY: PermittedAssetSelectionPolicy = {
+  category: "database",
+  name: "数据库实例",
+  terminalName: "database asset",
+  searchPlaceholder: "输入数据库名称关键词"
 };
-const PERMED_HOST_ASSET_DETAIL_OPERATION: ApiOperation = {
-  method: "GET",
-  path: "/perms/users/self/assets/{id}/",
-  basePath: "/api/v1",
-  operationId: "perms_users_self_host_asset_read",
-  tag: "perms_users",
-  summary: "Read current user's permitted host asset detail",
-  queryParameters: [],
-  pathParameters: [{ name: "id", required: true, schema: { type: "string" } }]
+const HOST_PERMITTED_ASSET_POLICY: PermittedAssetSelectionPolicy = {
+  category: "host",
+  name: "主机",
+  terminalName: "host asset",
+  searchPlaceholder: "输入主机名称关键词"
 };
 const ASSET_TABLE_COLUMNS = [
   "id",
@@ -268,46 +315,11 @@ const GROUP_DESCRIPTIONS = new Map<string, string>([
 const RESOURCE_LABELS_BY_TAG = new Map<string, string>([
   ["assets_assets", "Asset records"]
 ]);
-const RESERVED_REQUEST_OPTION_FLAGS = new Set([
-  "param",
-  "path",
-  "query",
-  "header",
-  "limit",
-  "offset",
-  "body",
-  "dry-run",
-  "include-headers",
-  "json"
-]);
 const DEPRECATED_QUERY_OPTION_WARNING =
   "警告: --query name=value 已弃用，将在下个版本删除；请改用具体子命令的直接 query 选项，例如 --search value。\n";
 
-interface QueryOptionBinding {
-  parameterName: string;
-  flagName: string;
-  attributeName: string;
-}
-
 function resolveBaseUrl(host: string): string {
   return host.includes("://") ? host : `https://${host}`;
-}
-
-export function operationCommandPath(operation: ApiOperation): string[] {
-  const tagParts = operation.tag.split("_").filter((part) => part.length > 0);
-  const actionText = operation.operationId.startsWith(`${operation.tag}_`)
-    ? operation.operationId.slice(operation.tag.length + 1)
-    : operation.operationId;
-  const actionParts = actionText.split("_").filter((part) => part.length > 0);
-  return collapseAdjacentDuplicates([...tagParts, ...actionParts]).map(toCommandName);
-}
-
-function toCommandName(value: string): string {
-  return value.replaceAll("_", "-");
-}
-
-function collapseAdjacentDuplicates(values: string[]): string[] {
-  return values.filter((value, index) => index === 0 || value !== values[index - 1]);
 }
 
 function envColumns(env: NodeJS.ProcessEnv): number | undefined {
@@ -331,10 +343,14 @@ export function buildProgram(options: BuildProgramOptions = {}): Command {
   const select = options.select ?? selectFromTerminal;
   const databaseAssetSelect =
     options.databaseAssetSelect ??
-    (stdin.isTTY && !options.select ? selectDatabaseAssetFromTerminal : databaseAssetSelectFromChoicePrompt(select));
+    (stdin.isTTY && !options.select
+      ? (message, input) => selectPermittedAssetFromTerminal(message, input, DATABASE_PERMITTED_ASSET_POLICY)
+      : permittedAssetSelectFromChoicePrompt(select, DATABASE_PERMITTED_ASSET_POLICY));
   const hostAssetSelect =
     options.hostAssetSelect ??
-    (stdin.isTTY && !options.select ? selectHostAssetFromTerminal : hostAssetSelectFromChoicePrompt(select));
+    (stdin.isTTY && !options.select
+      ? (message, input) => selectPermittedAssetFromTerminal(message, input, HOST_PERMITTED_ASSET_POLICY)
+      : permittedAssetSelectFromChoicePrompt(select, HOST_PERMITTED_ASSET_POLICY));
   const upgradeRunner = options.upgradeRunner ?? runUpgradeProcess;
   const env = options.env ?? process.env;
   const configPath = resolveConfigPath(options.configPath, env);
@@ -350,8 +366,7 @@ export function buildProgram(options: BuildProgramOptions = {}): Command {
     select,
     databaseAssetSelect,
     hostAssetSelect,
-    canConfirmDatabaseReusable: options.confirm !== undefined || stdin.isTTY,
-    canConfirmHostReusable: options.confirm !== undefined || stdin.isTTY,
+    canConfirmReusable: options.confirm !== undefined || stdin.isTTY,
     configPath,
     config,
     env,
@@ -512,7 +527,7 @@ function registerOperationCommands(parent: Command, operations: ApiOperation[], 
     operationCommand.action(async (commandOptions: RequestCommandOptions, command: Command) => {
       await runOperation(operation, commandOptions, command, context);
     });
-    addRequestOptions(operationCommand);
+    addRequestOptions(operationCommand, operation);
     addOperationQueryOptions(operationCommand, operation);
     operationCommand.addHelpText("after", operationHelpDetails(operation));
   }
@@ -529,7 +544,7 @@ function registerDatabaseTokenCommand(parent: Command, operations: ApiOperation[
     .option("--connect-method <method>", "JumpServer connection method", DEFAULT_DATABASE_CONNECT_METHOD)
     .option("--protocol <protocol>", "Database protocol, defaults to the selected asset protocol")
     .option("--all", "Create tokens for all matching permitted database assets without prompting")
-    .option("--limit <number>", "Database asset page size", String(DEFAULT_DATABASE_TOKEN_LIMIT))
+    .option("--limit <number>", "Database asset page size", String(DEFAULT_ASSET_TOKEN_LIMIT))
     .option("--reusable", "Enable reusable database token")
     .option("--no-reusable", "Disable reusable database token")
     .option("--jms-url", "Print the raw JumpServer jms:// client URL")
@@ -547,12 +562,12 @@ function registerHostTokenCommand(parent: Command, operations: ApiOperation[], c
     .description("Create a host SSH connection token")
     .argument("[pattern]", "Host asset name glob or substring")
     .option("--account <name>", "JumpServer asset account alias/name, defaults to a permitted account")
-    .option("--account-username <username>", "Asset account username for direct SSH command, defaults to the account username")
+    .option("--account-username <username>", "Permitted asset account username for direct SSH command, defaults to the account username")
     .option("--login-username <username>", "JumpServer login username for direct SSH command, defaults to the current profile")
     .option("--connect-method <method>", "JumpServer connection method", DEFAULT_HOST_CONNECT_METHOD)
     .option("--protocol <protocol>", "Host protocol, defaults to ssh")
     .option("--all", "Create tokens for all matching permitted host assets without prompting")
-    .option("--limit <number>", "Host asset page size", String(DEFAULT_HOST_TOKEN_LIMIT))
+    .option("--limit <number>", "Host asset page size", String(DEFAULT_ASSET_TOKEN_LIMIT))
     .option("--reusable", "Enable reusable SSH token")
     .option("--no-reusable", "Disable reusable SSH token")
     .option("--jms-url", "Print the raw JumpServer jms:// client URL")
@@ -591,7 +606,7 @@ function describeOperationCommand(operation: ApiOperation): string {
 }
 
 function operationResourceLabel(operation: ApiOperation, path: string[]): string {
-  const originalTagPath = operation.tag.split("_").filter((part) => part.length > 0).map(toCommandName);
+  const originalTagPath = operation.tag.split("_").filter((part) => part.length > 0);
   const originalTagResourceLabel = RESOURCE_LABELS_BY_TAG.get(operation.tag);
   if (originalTagResourceLabel) {
     return originalTagResourceLabel;
@@ -729,43 +744,12 @@ interface InteractiveRunContext extends RunContext {
   select: SelectPrompt;
   databaseAssetSelect: DatabaseAssetSelectPrompt;
   hostAssetSelect: HostAssetSelectPrompt;
-  canConfirmDatabaseReusable: boolean;
-  canConfirmHostReusable: boolean;
+  canConfirmReusable: boolean;
 }
 
 type LoginRunContext = InteractiveRunContext;
 
-export interface DatabaseAsset {
-  id: string;
-  name: string;
-  address?: string;
-  protocols?: unknown;
-  platform?: unknown;
-}
-
-export interface DatabaseAssetPage {
-  items: DatabaseAsset[];
-  count?: number;
-  nextOffset: number;
-  hasMore: boolean;
-}
-
-export interface HostAsset {
-  id: string;
-  name: string;
-  address?: string;
-  protocols?: unknown;
-  platform?: unknown;
-}
-
-export interface HostAssetPage {
-  items: HostAsset[];
-  count?: number;
-  nextOffset: number;
-  hasMore: boolean;
-}
-
-interface DatabasePermedAccount {
+interface PermittedAccount {
   alias: string;
   username: string;
 }
@@ -780,7 +764,7 @@ interface HostTokenIdentity {
   accountUsername: string;
 }
 
-interface LoadMoreDatabaseAssetsChoice {
+interface LoadMorePermittedAssetsChoice {
   type: "load-more";
 }
 
@@ -802,40 +786,38 @@ interface HostSshConnection {
   accountCommand?: string;
 }
 
-interface DatabaseTokenOutput {
+interface ConnectionTokenCredential {
+  id: string;
+  expiresAt?: string;
+  password?: string;
+}
+
+interface ConnectionTokenOutputBase {
   asset: {
     id: string;
     name: string;
     address?: string;
   };
-  account: string;
-  inputUsername: string;
   password?: string;
   protocol: string;
   connectMethod: string;
   reusable: boolean;
   tokenId: string;
   expiresAt?: string;
+}
+
+interface DatabaseTokenOutput extends ConnectionTokenOutputBase {
+  account: string;
+  inputUsername: string;
   dbGuide?: DatabaseGuideConnection;
   dsn?: string;
   jmsUrl?: string;
 }
 
-interface HostTokenOutput {
-  asset: {
-    id: string;
-    name: string;
-    address?: string;
-  };
+interface HostTokenOutput extends ConnectionTokenOutputBase {
   account: string;
   accountUsername: string;
   loginUsername?: string;
-  password?: string;
-  protocol: string;
-  connectMethod: string;
-  reusable: boolean;
-  tokenId: string;
-  expiresAt?: string;
   sshGuide?: HostSshConnection;
   jmsUrl?: string;
 }
@@ -847,7 +829,7 @@ async function runLogin(
   context: LoginRunContext
 ): Promise<void> {
   try {
-    const globalOptions = resolveGlobalOptions(command, context);
+    const globalOptions = resolveConnectionOptions(command, context);
     const resolvedCommandOptions = resolveLoginCommandOptions(commandOptions, context.env);
     const host = resolveRequiredHost(commandOptions.host ?? globalOptions.host);
     const body = await buildLoginBody(resolvedCommandOptions, context.prompt);
@@ -931,27 +913,18 @@ async function runDatabaseTokenCommand(
   operations: ApiOperation[],
   context: InteractiveRunContext
 ): Promise<void> {
-  try {
-    const limit = parsePositiveInteger(options.limit ?? String(DEFAULT_DATABASE_TOKEN_LIMIT), "--limit");
-    const assets = options.all
-      ? await fetchAllDatabaseAssets(pattern, limit, command, context)
-      : await choosePaginatedDatabaseAssets(pattern, limit, command, operations, context);
-    if (assets.length === 0) {
-      throw new Error("未选择数据库实例");
-    }
-    const reusable = await resolveDatabaseReusable(options, context);
-
-    const outputs: DatabaseTokenOutput[] = [];
-    for (const asset of assets) {
-      outputs.push(await createDatabaseTokenOutput(asset, options, reusable, command, operations, context));
-    }
-
-    context.stdout(formatDatabaseTokenOutputs(outputs, options, context.terminalColumns));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    context.stderr(`${message}\n`);
-    process.exitCode = 1;
-  }
+  return runConnectionTokenWorkflow({
+    pattern,
+    options,
+    command,
+    context,
+    policy: DATABASE_PERMITTED_ASSET_POLICY,
+    selectAssets: context.databaseAssetSelect,
+    prepare: async () => undefined,
+    createOutput: (asset, reusable) =>
+      createDatabaseTokenOutput(asset, options, reusable, command, operations, context),
+    formatOutputs: (outputs) => formatDatabaseTokenOutputs(outputs, options, context.terminalColumns)
+  });
 }
 
 async function runHostTokenCommand(
@@ -961,28 +934,64 @@ async function runHostTokenCommand(
   operations: ApiOperation[],
   context: InteractiveRunContext
 ): Promise<void> {
+  return runConnectionTokenWorkflow({
+    pattern,
+    options,
+    command,
+    context,
+    policy: HOST_PERMITTED_ASSET_POLICY,
+    selectAssets: context.hostAssetSelect,
+    prepare: () =>
+      options.sshCommand
+        ? Promise.resolve(undefined)
+        : resolveHostLoginUsername(options, command, operations, context),
+    createOutput: (asset, reusable, loginUsername) =>
+      createHostTokenOutput(asset, options, reusable, loginUsername, command, operations, context),
+    formatOutputs: (outputs) => formatHostTokenOutputs(outputs, options, context.terminalColumns)
+  });
+}
+
+async function runConnectionTokenWorkflow<
+  TOptions extends ConnectionTokenCommandOptions,
+  TPrepared,
+  TOutput
+>(workflow: ConnectionTokenWorkflow<TOptions, TPrepared, TOutput>): Promise<void> {
   try {
-    const limit = parsePositiveInteger(options.limit ?? String(DEFAULT_HOST_TOKEN_LIMIT), "--limit");
-    const assets = options.all
-      ? await fetchAllHostAssets(pattern, limit, command, context)
-      : await choosePaginatedHostAssets(pattern, limit, command, context);
+    const limit = parsePositiveInteger(
+      workflow.options.limit ?? String(DEFAULT_ASSET_TOKEN_LIMIT),
+      "--limit"
+    );
+    const assets = workflow.options.all
+      ? await fetchAllPermittedAssets(
+          workflow.pattern,
+          limit,
+          workflow.command,
+          workflow.context,
+          workflow.policy
+        )
+      : await choosePaginatedPermittedAssets(
+          workflow.pattern,
+          limit,
+          workflow.command,
+          workflow.context,
+          workflow.selectAssets,
+          workflow.policy
+        );
     if (assets.length === 0) {
-      throw new Error("未选择主机");
+      throw new Error(`未选择${workflow.policy.name}`);
     }
-    const reusable = await resolveHostReusable(options, context);
-    const loginUsername = options.sshCommand
-      ? undefined
-      : await resolveHostLoginUsername(options, command, operations, context);
+    const reusable = await resolveReusable(workflow.options, workflow.context);
+    const prepared = await workflow.prepare();
 
-    const outputs: HostTokenOutput[] = [];
+    const outputs: TOutput[] = [];
     for (const asset of assets) {
-      outputs.push(await createHostTokenOutput(asset, options, reusable, loginUsername, command, operations, context));
+      outputs.push(await workflow.createOutput(asset, reusable, prepared));
     }
 
-    context.stdout(formatHostTokenOutputs(outputs, options, context.terminalColumns));
+    workflow.context.stdout(workflow.formatOutputs(outputs));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    context.stderr(`${message}\n`);
+    workflow.context.stderr(`${message}\n`);
     process.exitCode = 1;
   }
 }
@@ -998,11 +1007,8 @@ async function createDatabaseTokenOutput(
   const { account, inputUsername } = await resolveDatabaseTokenIdentity(asset, options, command, operations, context);
   const protocol = options.protocol ?? defaultDatabaseProtocol(asset);
   const connectMethod = options.connectMethod ?? DEFAULT_DATABASE_CONNECT_METHOD;
-  const tokenPayload = await callOperationJson({
-    operation: findOperation("users_connection-token_create", operations),
-    command,
-    context,
-    body: {
+  const { token, jmsUrl } = await createConnectionToken(
+    {
       asset: asset.id,
       account,
       protocol,
@@ -1010,33 +1016,18 @@ async function createDatabaseTokenOutput(
       input_secret: "",
       connect_method: connectMethod,
       connect_options: buildDatabaseConnectOptions(reusable)
-    }
-  });
-  const token = normalizeConnectionToken(tokenPayload);
-  const clientUrlPayload = await callOperationJson({
-    operation: findOperation("users_connection-token_client-url_read", operations),
+    },
     command,
-    context,
-    pathValues: { id: token.id }
-  });
-  const jmsUrl = extractClientUrl(clientUrlPayload);
+    operations,
+    context
+  );
   const dbGuide = extractDatabaseGuideConnection(jmsUrl, token);
   const dsn = dbGuide ? formatDatabaseDsn(protocol, dbGuide) : undefined;
 
   return {
-    asset: {
-      id: asset.id,
-      name: asset.name,
-      ...(asset.address ? { address: asset.address } : {})
-    },
+    ...connectionTokenOutputBase(asset, token, protocol, connectMethod, reusable),
     account,
     inputUsername,
-    ...(token.password ? { password: token.password } : {}),
-    protocol,
-    connectMethod,
-    reusable,
-    tokenId: token.id,
-    ...(token.expiresAt ? { expiresAt: token.expiresAt } : {}),
     ...(dbGuide ? { dbGuide } : {}),
     ...(dsn ? { dsn } : {}),
     ...(options.jmsUrl ? { jmsUrl } : {})
@@ -1055,11 +1046,8 @@ async function createHostTokenOutput(
   const { account, accountUsername } = await resolveHostTokenIdentity(asset, options, command, context);
   const protocol = options.protocol ?? defaultHostProtocol(asset);
   const connectMethod = options.connectMethod ?? DEFAULT_HOST_CONNECT_METHOD;
-  const tokenPayload = await callOperationJson({
-    operation: findOperation("users_connection-token_create", operations),
-    command,
-    context,
-    body: {
+  const { token, jmsUrl } = await createConnectionToken(
+    {
       asset: asset.id,
       account,
       protocol,
@@ -1067,7 +1055,60 @@ async function createHostTokenOutput(
       input_secret: "",
       connect_method: connectMethod,
       connect_options: buildHostConnectOptions(reusable)
-    }
+    },
+    command,
+    operations,
+    context
+  );
+  const sshGuide = extractHostSshConnection(jmsUrl, token, {
+    asset,
+    accountUsername,
+    ...(loginUsername ? { loginUsername } : {})
+  });
+
+  return {
+    ...connectionTokenOutputBase(asset, token, protocol, connectMethod, reusable),
+    account,
+    accountUsername,
+    ...(loginUsername ? { loginUsername } : {}),
+    ...(sshGuide ? { sshGuide } : {}),
+    ...(options.jmsUrl ? { jmsUrl } : {})
+  };
+}
+
+function connectionTokenOutputBase(
+  asset: PermittedAsset,
+  token: ConnectionTokenCredential,
+  protocol: string,
+  connectMethod: string,
+  reusable: boolean
+): ConnectionTokenOutputBase {
+  return {
+    asset: {
+      id: asset.id,
+      name: asset.name,
+      ...(asset.address ? { address: asset.address } : {})
+    },
+    ...(token.password ? { password: token.password } : {}),
+    protocol,
+    connectMethod,
+    reusable,
+    tokenId: token.id,
+    ...(token.expiresAt ? { expiresAt: token.expiresAt } : {})
+  };
+}
+
+async function createConnectionToken(
+  body: Record<string, unknown>,
+  command: Command,
+  operations: ApiOperation[],
+  context: RunContext
+): Promise<{ token: ConnectionTokenCredential; jmsUrl: string }> {
+  const tokenPayload = await callOperationJson({
+    operation: findOperation("users_connection-token_create", operations),
+    command,
+    context,
+    body
   });
   const token = normalizeConnectionToken(tokenPayload);
   const clientUrlPayload = await callOperationJson({
@@ -1076,31 +1117,7 @@ async function createHostTokenOutput(
     context,
     pathValues: { id: token.id }
   });
-  const jmsUrl = extractClientUrl(clientUrlPayload);
-  const sshGuide = extractHostSshConnection(jmsUrl, token, {
-    asset,
-    accountUsername,
-    ...(loginUsername ? { loginUsername } : {})
-  });
-
-  return {
-    asset: {
-      id: asset.id,
-      name: asset.name,
-      ...(asset.address ? { address: asset.address } : {})
-    },
-    account,
-    accountUsername,
-    ...(loginUsername ? { loginUsername } : {}),
-    ...(token.password ? { password: token.password } : {}),
-    protocol,
-    connectMethod,
-    reusable,
-    tokenId: token.id,
-    ...(token.expiresAt ? { expiresAt: token.expiresAt } : {}),
-    ...(sshGuide ? { sshGuide } : {}),
-    ...(options.jmsUrl ? { jmsUrl } : {})
-  };
+  return { token, jmsUrl: extractClientUrl(clientUrlPayload) };
 }
 
 async function resolveDatabaseTokenIdentity(
@@ -1117,7 +1134,7 @@ async function resolveDatabaseTokenIdentity(
   }
 
   if (options.all) {
-    const account = await chooseDatabasePermedAccount(asset, command, context);
+    const account = await chooseDatabasePermittedAccount(asset, command, context);
     if (options.inputUsername) {
       return { account: account.alias, inputUsername: options.inputUsername };
     }
@@ -1146,19 +1163,19 @@ async function resolveHostTokenIdentity(
     };
   }
 
-  const account = await chooseHostPermedAccount(asset, command, context, !options.all);
+  const account = await chooseHostPermittedAccount(asset, command, context, !options.all);
   return {
     account: account.alias,
     accountUsername: options.accountUsername ?? account.username
   };
 }
 
-async function chooseDatabasePermedAccount(
+async function chooseDatabasePermittedAccount(
   asset: DatabaseAsset,
   command: Command,
   context: RunContext
-): Promise<DatabasePermedAccount> {
-  const accounts = await fetchDatabasePermedAccounts(asset, command, context);
+): Promise<PermittedAccount> {
+  const accounts = await fetchPermittedAccounts(asset, command, context);
   const account = accounts.find((item) => !item.alias.startsWith("@")) ?? accounts.find((item) => item.alias === "@INPUT") ?? accounts[0];
   if (!account) {
     throw new Error(`数据库实例没有可用授权账号: ${asset.name}`);
@@ -1166,13 +1183,13 @@ async function chooseDatabasePermedAccount(
   return account;
 }
 
-async function chooseHostPermedAccount(
+async function chooseHostPermittedAccount(
   asset: HostAsset,
   command: Command,
   context: InteractiveRunContext,
   allowInteractiveSelection: boolean
-): Promise<DatabasePermedAccount> {
-  const accounts = await fetchHostPermedAccounts(asset, command, context);
+): Promise<PermittedAccount> {
+  const accounts = await fetchPermittedAccounts(asset, command, context);
   const nonVirtualAccounts = accounts.filter((item) => !item.alias.startsWith("@"));
   const candidates = nonVirtualAccounts.length > 0 ? nonVirtualAccounts : accounts;
   if (candidates.length === 0) {
@@ -1191,36 +1208,20 @@ async function chooseHostPermedAccount(
   );
 }
 
-async function resolveDatabaseReusable(
-  options: DatabaseTokenCommandOptions,
+async function resolveReusable(
+  options: { all?: boolean; reusable?: boolean },
   context: InteractiveRunContext
 ): Promise<boolean> {
   if (options.reusable !== undefined) {
     return options.reusable;
   }
   if (options.all) {
-    return DEFAULT_DATABASE_REUSABLE;
+    return DEFAULT_REUSABLE;
   }
-  if (!context.canConfirmDatabaseReusable) {
-    return DEFAULT_DATABASE_REUSABLE;
+  if (!context.canConfirmReusable) {
+    return DEFAULT_REUSABLE;
   }
-  return context.confirm("是否开启复用", DEFAULT_DATABASE_REUSABLE);
-}
-
-async function resolveHostReusable(
-  options: HostTokenCommandOptions,
-  context: InteractiveRunContext
-): Promise<boolean> {
-  if (options.reusable !== undefined) {
-    return options.reusable;
-  }
-  if (options.all) {
-    return DEFAULT_HOST_REUSABLE;
-  }
-  if (!context.canConfirmHostReusable) {
-    return DEFAULT_HOST_REUSABLE;
-  }
-  return context.confirm("是否开启复用", DEFAULT_HOST_REUSABLE);
+  return context.confirm("是否开启复用", DEFAULT_REUSABLE);
 }
 
 async function resolveHostLoginUsername(
@@ -1256,22 +1257,35 @@ function buildHostConnectOptions(reusable: boolean): { reusable: boolean } {
   return { reusable };
 }
 
-async function choosePaginatedDatabaseAssets(
+async function choosePaginatedPermittedAssets(
   pattern: string | undefined,
   limit: number,
   command: Command,
-  operations: ApiOperation[],
-  context: InteractiveRunContext
-): Promise<DatabaseAsset[]> {
+  context: RunContext,
+  selectAssets: PermittedAssetSelectPrompt,
+  policy: PermittedAssetSelectionPolicy
+): Promise<PermittedAsset[]> {
   const initialSearch = searchTextFromGlob(pattern);
-  const pageCache = new Map<string, DatabaseAssetPage>();
-  const fetchPage: DatabaseAssetSelectionInput["fetchPage"] = async (search, offset) => {
+  const pageCache = new Map<string, PermittedAssetPage>();
+  const seenSourceAssetIds = new Map<string, Set<string>>();
+  const fetchPage: PermittedAssetSelectionInput["fetchPage"] = async (search, offset) => {
     const cacheKey = `${search ?? ""}\0${offset}`;
     const cachedPage = pageCache.get(cacheKey);
     if (cachedPage) {
       return cachedPage;
     }
-    const page = await fetchDatabaseAssetsPage(search, limit, offset, command, context);
+    const sourcePage = await fetchPermittedAssetsPage(policy.category, search, limit, offset, command, context);
+    const searchKey = search ?? "";
+    const seenIds = seenSourceAssetIds.get(searchKey) ?? new Set<string>();
+    seenSourceAssetIds.set(searchKey, seenIds);
+    const hasNewSourceAssets = collectNewPermittedAssets(sourcePage.items, seenIds).length > 0;
+    const page = filterPermittedAssetPageForPattern(
+      {
+        ...sourcePage,
+        hasMore: sourcePage.hasMore && hasNewSourceAssets
+      },
+      search === initialSearch ? pattern : undefined
+    );
     pageCache.set(cacheKey, page);
     return page;
   };
@@ -1282,8 +1296,8 @@ async function choosePaginatedDatabaseAssets(
     }
   }
 
-  return context.databaseAssetSelect(
-    pattern ? "匹配到多个数据库实例" : "请选择数据库实例",
+  return selectAssets(
+    pattern ? `匹配到多个${policy.name}` : `请选择${policy.name}`,
     {
       ...(initialSearch ? { initialSearch } : {}),
       pageSize: limit,
@@ -1292,122 +1306,42 @@ async function choosePaginatedDatabaseAssets(
   );
 }
 
-async function choosePaginatedHostAssets(
+async function fetchAllPermittedAssets(
   pattern: string | undefined,
   limit: number,
   command: Command,
-  context: InteractiveRunContext
-): Promise<HostAsset[]> {
-  const initialSearch = searchTextFromGlob(pattern);
-  const pageCache = new Map<string, HostAssetPage>();
-  const fetchPage: HostAssetSelectionInput["fetchPage"] = async (search, offset) => {
-    const cacheKey = `${search ?? ""}\0${offset}`;
-    const cachedPage = pageCache.get(cacheKey);
-    if (cachedPage) {
-      return cachedPage;
-    }
-    const page = await fetchHostAssetsPage(search, limit, offset, command, context);
-    pageCache.set(cacheKey, page);
-    return page;
-  };
-  if (initialSearch) {
-    const firstPage = await fetchPage(initialSearch, 0);
-    if (firstPage.items.length === 1 && !firstPage.hasMore) {
-      return [firstPage.items[0]!];
-    }
-  }
-
-  return context.hostAssetSelect(
-    pattern ? "匹配到多个主机" : "请选择主机",
-    {
-      ...(initialSearch ? { initialSearch } : {}),
-      pageSize: limit,
-      fetchPage
-    }
-  );
-}
-
-async function fetchAllDatabaseAssets(
-  pattern: string | undefined,
-  limit: number,
-  command: Command,
-  context: RunContext
-): Promise<DatabaseAsset[]> {
+  context: RunContext,
+  policy: PermittedAssetSelectionPolicy
+): Promise<PermittedAsset[]> {
   const search = searchTextFromGlob(pattern);
-  const assets: DatabaseAsset[] = [];
+  const assets: PermittedAsset[] = [];
   const seenAssetIds = new Set<string>();
-  const seenFetchedAssetIds = new Set<string>();
   let hasMore = true;
   let offset = 0;
 
   while (hasMore) {
-    const page = await fetchDatabaseAssetsPage(search, limit, offset, command, context);
+    const page = await fetchPermittedAssetsPage(policy.category, search, limit, offset, command, context);
+    const previousOffset = offset;
     hasMore = page.hasMore;
     offset = page.nextOffset;
+    const newAssets = collectNewPermittedAssets(page.items, seenAssetIds);
+    assets.push(...newAssets);
 
-    let newFetchedAssets = 0;
-    for (const asset of page.items) {
-      if (!seenFetchedAssetIds.has(asset.id)) {
-        seenFetchedAssetIds.add(asset.id);
-        newFetchedAssets += 1;
-      }
-      if (!seenAssetIds.has(asset.id)) {
-        seenAssetIds.add(asset.id);
-        assets.push(asset);
-      }
-    }
-
-    if (newFetchedAssets === 0) {
+    if (hasMore && (offset <= previousOffset || newAssets.length === 0)) {
       hasMore = false;
     }
   }
 
-  return assets;
+  return matchPermittedAssets(assets, pattern);
 }
 
-async function fetchAllHostAssets(
-  pattern: string | undefined,
-  limit: number,
-  command: Command,
-  context: RunContext
-): Promise<HostAsset[]> {
-  const search = searchTextFromGlob(pattern);
-  const assets: HostAsset[] = [];
-  const seenAssetIds = new Set<string>();
-  const seenFetchedAssetIds = new Set<string>();
-  let hasMore = true;
-  let offset = 0;
-
-  while (hasMore) {
-    const page = await fetchHostAssetsPage(search, limit, offset, command, context);
-    hasMore = page.hasMore;
-    offset = page.nextOffset;
-
-    let newFetchedAssets = 0;
-    for (const asset of page.items) {
-      if (!seenFetchedAssetIds.has(asset.id)) {
-        seenFetchedAssetIds.add(asset.id);
-        newFetchedAssets += 1;
-      }
-      if (!seenAssetIds.has(asset.id)) {
-        seenAssetIds.add(asset.id);
-        assets.push(asset);
-      }
-    }
-
-    if (newFetchedAssets === 0) {
-      hasMore = false;
-    }
-  }
-
-  return assets;
-}
-
-function databaseAssetSelectFromChoicePrompt(select: SelectPrompt): DatabaseAssetSelectPrompt {
+function permittedAssetSelectFromChoicePrompt(
+  select: SelectPrompt,
+  policy: PermittedAssetSelectionPolicy
+): PermittedAssetSelectPrompt {
   return async (message, input) => {
-    const loadedAssets: DatabaseAsset[] = [];
+    const loadedAssets: PermittedAsset[] = [];
     const seenAssetIds = new Set<string>();
-    const seenFetchedAssetIds = new Set<string>();
     let count: number | undefined;
     let hasMore = true;
     let offset = 0;
@@ -1415,232 +1349,85 @@ function databaseAssetSelectFromChoicePrompt(select: SelectPrompt): DatabaseAsse
 
     while (hasMore || loadedAssets.length > 0) {
       if (hasMore) {
+        const previousOffset = offset;
         const page = await input.fetchPage(input.initialSearch, offset);
-        count = page.count;
-        hasMore = page.hasMore;
+        count = page.count ?? count;
         offset = page.nextOffset;
+        hasMore = page.hasMore && offset > previousOffset;
         loadedCount = count === undefined ? offset : Math.min(offset, count);
 
-        let newFetchedAssets = 0;
-        for (const asset of page.items) {
-          if (!seenFetchedAssetIds.has(asset.id)) {
-            seenFetchedAssetIds.add(asset.id);
-            newFetchedAssets += 1;
-          }
-        }
-        if (newFetchedAssets === 0) {
-          hasMore = false;
-        }
-
-        for (const asset of page.items) {
-          if (!seenAssetIds.has(asset.id)) {
-            seenAssetIds.add(asset.id);
-            loadedAssets.push(asset);
-          }
-        }
+        loadedAssets.push(...collectNewPermittedAssets(page.items, seenAssetIds));
       }
 
       if (loadedAssets.length === 0 && hasMore) {
         continue;
       }
       if (loadedAssets.length === 0) {
-        throw new Error(input.initialSearch ? `未找到匹配的数据库实例: ${input.initialSearch}` : "未找到可选择的数据库实例");
+        throw new Error(input.initialSearch ? `未找到匹配的${policy.name}: ${input.initialSearch}` : `未找到可选择的${policy.name}`);
       }
       if (input.initialSearch && loadedAssets.length === 1 && !hasMore) {
         return [loadedAssets[0]!];
       }
 
-      const selected = await selectDatabaseAssetPage(loadedAssets, message, loadedCount, count, hasMore, select);
-      if (isLoadMoreDatabaseAssetsChoice(selected)) {
-        if (!hasMore) {
-          continue;
-        }
+      const selected = await selectPermittedAssetPage(loadedAssets, message, loadedCount, count, hasMore, select);
+      if (isLoadMorePermittedAssetsChoice(selected)) {
         continue;
       }
       return [selected];
     }
 
-    throw new Error(input.initialSearch ? `未找到匹配的数据库实例: ${input.initialSearch}` : "未找到可选择的数据库实例");
+    throw new Error(input.initialSearch ? `未找到匹配的${policy.name}: ${input.initialSearch}` : `未找到可选择的${policy.name}`);
   };
 }
 
-function hostAssetSelectFromChoicePrompt(select: SelectPrompt): HostAssetSelectPrompt {
-  return async (message, input) => {
-    const loadedAssets: HostAsset[] = [];
-    const seenAssetIds = new Set<string>();
-    const seenFetchedAssetIds = new Set<string>();
-    let count: number | undefined;
-    let hasMore = true;
-    let offset = 0;
-    let loadedCount = 0;
-
-    while (hasMore || loadedAssets.length > 0) {
-      if (hasMore) {
-        const page = await input.fetchPage(input.initialSearch, offset);
-        count = page.count;
-        hasMore = page.hasMore;
-        offset = page.nextOffset;
-        loadedCount = count === undefined ? offset : Math.min(offset, count);
-
-        let newFetchedAssets = 0;
-        for (const asset of page.items) {
-          if (!seenFetchedAssetIds.has(asset.id)) {
-            seenFetchedAssetIds.add(asset.id);
-            newFetchedAssets += 1;
-          }
-        }
-        if (newFetchedAssets === 0) {
-          hasMore = false;
-        }
-
-        for (const asset of page.items) {
-          if (!seenAssetIds.has(asset.id)) {
-            seenAssetIds.add(asset.id);
-            loadedAssets.push(asset);
-          }
-        }
-      }
-
-      if (loadedAssets.length === 0 && hasMore) {
-        continue;
-      }
-      if (loadedAssets.length === 0) {
-        throw new Error(input.initialSearch ? `未找到匹配的主机: ${input.initialSearch}` : "未找到可选择的主机");
-      }
-      if (input.initialSearch && loadedAssets.length === 1 && !hasMore) {
-        return [loadedAssets[0]!];
-      }
-
-      const selected = await selectHostAssetPage(loadedAssets, message, loadedCount, count, hasMore, select);
-      if (isLoadMoreHostAssetsChoice(selected)) {
-        if (!hasMore) {
-          continue;
-        }
-        continue;
-      }
-      return [selected];
-    }
-
-    throw new Error(input.initialSearch ? `未找到匹配的主机: ${input.initialSearch}` : "未找到可选择的主机");
-  };
-}
-
-async function fetchDatabaseAssetsPage(
+async function fetchPermittedAssetsPage(
+  category: PermittedAssetCategory,
   search: string | undefined,
   limit: number,
   offset: number,
   command: Command,
   context: RunContext
-): Promise<DatabaseAssetPage> {
+): Promise<PermittedAssetPage> {
   const payload = await callOperationJson({
-    operation: PERMED_DATABASE_ASSETS_OPERATION,
+    operation: PERMITTED_ASSETS_OPERATION,
     command,
     context,
     queryValues: {
-      category: "database",
+      category,
       ...(search ? { search } : {}),
       limit,
       ...(offset > 0 ? { offset } : {})
     }
   });
-  return normalizeDatabaseAssetsPage(payload, limit, offset);
+  return normalizePermittedAssetPage(payload, limit, offset);
 }
 
-async function fetchHostAssetsPage(
-  search: string | undefined,
-  limit: number,
-  offset: number,
+async function fetchPermittedAccounts(
+  asset: PermittedAsset,
   command: Command,
   context: RunContext
-): Promise<HostAssetPage> {
+): Promise<PermittedAccount[]> {
   const payload = await callOperationJson({
-    operation: PERMED_HOST_ASSETS_OPERATION,
-    command,
-    context,
-    queryValues: {
-      category: "host",
-      ...(search ? { search } : {}),
-      limit,
-      ...(offset > 0 ? { offset } : {})
-    }
-  });
-  return normalizeHostAssetsPage(payload, limit, offset);
-}
-
-async function fetchDatabasePermedAccounts(
-  asset: DatabaseAsset,
-  command: Command,
-  context: RunContext
-): Promise<DatabasePermedAccount[]> {
-  const payload = await callOperationJson({
-    operation: PERMED_DATABASE_ASSET_DETAIL_OPERATION,
+    operation: PERMITTED_ASSET_DETAIL_OPERATION,
     command,
     context,
     pathValues: { id: asset.id }
   });
-  return normalizeDatabasePermedAccounts(payload);
+  return normalizePermittedAccounts(payload);
 }
 
-async function fetchHostPermedAccounts(
-  asset: HostAsset,
-  command: Command,
-  context: RunContext
-): Promise<DatabasePermedAccount[]> {
-  const payload = await callOperationJson({
-    operation: PERMED_HOST_ASSET_DETAIL_OPERATION,
-    command,
-    context,
-    pathValues: { id: asset.id }
-  });
-  return normalizeDatabasePermedAccounts(payload);
-}
-
-async function selectDatabaseAssetPage(
-  assets: DatabaseAsset[],
+async function selectPermittedAssetPage(
+  assets: PermittedAsset[],
   message: string,
   loadedCount: number,
   count: number | undefined,
   hasMore: boolean,
   select: SelectPrompt
-): Promise<DatabaseAsset | LoadMoreDatabaseAssetsChoice> {
-  const loadMoreChoice: LoadMoreDatabaseAssetsChoice = { type: "load-more" };
-  const choices: Array<SelectChoice<DatabaseAsset | LoadMoreDatabaseAssetsChoice>> = [
+): Promise<PermittedAsset | LoadMorePermittedAssetsChoice> {
+  const loadMoreChoice: LoadMorePermittedAssetsChoice = { type: "load-more" };
+  const choices: Array<SelectChoice<PermittedAsset | LoadMorePermittedAssetsChoice>> = [
     ...assets.map((asset) => ({
-      label: formatDatabaseAssetOption(asset),
-      value: asset
-    })),
-    ...(hasMore
-      ? [
-          {
-            label:
-              count === undefined
-                ? `加载更多...（已加载 ${loadedCount}）`
-                : `加载更多...（已加载 ${loadedCount}/${count}）`,
-            value: loadMoreChoice
-          }
-        ]
-      : [])
-  ];
-
-  return select(message, choices);
-}
-
-interface LoadMoreHostAssetsChoice {
-  type: "load-more";
-}
-
-async function selectHostAssetPage(
-  assets: HostAsset[],
-  message: string,
-  loadedCount: number,
-  count: number | undefined,
-  hasMore: boolean,
-  select: SelectPrompt
-): Promise<HostAsset | LoadMoreHostAssetsChoice> {
-  const loadMoreChoice: LoadMoreHostAssetsChoice = { type: "load-more" };
-  const choices: Array<SelectChoice<HostAsset | LoadMoreHostAssetsChoice>> = [
-    ...assets.map((asset) => ({
-      label: formatHostAssetOption(asset),
+      label: formatPermittedAssetOption(asset),
       value: asset
     })),
     ...(hasMore
@@ -1742,15 +1529,14 @@ async function runAccessKeyAuth(
   try {
     const globalOptions = resolveGlobalOptions(command, context);
     const host = resolveRequiredHost(commandOptions.host ?? globalOptions.host);
-    const accessKeyId = commandOptions.accessKeyId ?? globalOptions.accessKeyId;
-    const accessKeySecret = commandOptions.accessKeySecret ?? globalOptions.accessKeySecret;
     const org = commandOptions.org ?? globalOptions.org;
 
-    if (!accessKeyId || !accessKeySecret) {
+    if (globalOptions.authenticationMode.kind !== "access-key") {
       throw new Error(
         "Missing Access Key credentials. Pass --access-key-id and --access-key-secret, or set JMS_ACCESS_KEY_ID and JMS_ACCESS_KEY_SECRET."
       );
     }
+    const { accessKeyId, accessKeySecret } = globalOptions.authenticationMode;
 
     const plan = await createRequestPlan({
       operation,
@@ -1801,17 +1587,32 @@ async function runAccessKeyAuth(
 }
 
 function resolveGlobalOptions(command: Command, context: RunContext): GlobalOptions {
-  const options = command.optsWithGlobals<GlobalOptions>();
-  const resolved: GlobalOptions = {};
+  const options = command.optsWithGlobals<CommandGlobalOptions>();
+  const resolved: GlobalOptions = {
+    authenticationMode: resolveAuthenticationMode({
+      cli: {
+        accessKeyId: options.accessKeyId,
+        accessKeySecret: options.accessKeySecret,
+        token: options.token,
+        privateToken: options.privateToken
+      },
+      env: {
+        accessKeyId: context.env.JMS_ACCESS_KEY_ID,
+        accessKeySecret: context.env.JMS_ACCESS_KEY_SECRET,
+        token: context.env.JMS_TOKEN,
+        privateToken: context.env.JMS_PRIVATE_TOKEN
+      },
+      config: context.config
+    })
+  };
+  Object.assign(resolved, resolveConnectionOptions(command, context));
+  return resolved;
+}
+
+function resolveConnectionOptions(command: Command, context: RunContext): ConnectionOptions {
+  const options = command.optsWithGlobals<CommandGlobalOptions>();
+  const resolved: ConnectionOptions = {};
   setIfDefined(resolved, "host", options.host ?? context.env.JMS_HOST ?? context.config.host);
-  setIfDefined(resolved, "accessKeyId", options.accessKeyId ?? context.env.JMS_ACCESS_KEY_ID ?? context.config.accessKeyId);
-  setIfDefined(
-    resolved,
-    "accessKeySecret",
-    options.accessKeySecret ?? context.env.JMS_ACCESS_KEY_SECRET ?? context.config.accessKeySecret
-  );
-  setIfDefined(resolved, "token", options.token ?? context.env.JMS_TOKEN ?? context.config.token);
-  setIfDefined(resolved, "privateToken", options.privateToken ?? context.env.JMS_PRIVATE_TOKEN ?? context.config.privateToken);
   setIfDefined(resolved, "org", options.org ?? context.env.JMS_ORG ?? context.config.org);
   return resolved;
 }
@@ -1941,7 +1742,7 @@ function parsePositiveInteger(value: string, optionName: string): number {
   return Number(value);
 }
 
-function normalizeDatabaseAssets(payload: unknown): DatabaseAsset[] {
+function normalizePermittedAssets(payload: unknown): PermittedAsset[] {
   return extractResultItems(payload).flatMap((item) => {
     if (!isPlainObject(item)) {
       return [];
@@ -1966,15 +1767,15 @@ function normalizeDatabaseAssets(payload: unknown): DatabaseAsset[] {
   });
 }
 
-function normalizeDatabaseAssetsPage(payload: unknown, limit: number, offset: number): DatabaseAssetPage {
+function normalizePermittedAssetPage(payload: unknown, limit: number, offset: number): PermittedAssetPage {
   const rawItems = extractResultItems(payload);
-  const items = normalizeDatabaseAssets(rawItems);
+  const items = normalizePermittedAssets(rawItems);
   const reportedCount = isPlainObject(payload) && typeof payload.count === "number" ? payload.count : undefined;
   const hasNextLink = isPlainObject(payload) && typeof payload.next === "string" && payload.next.length > 0;
   const loadedThroughPage = offset + rawItems.length;
   const count =
     reportedCount !== undefined && reportedCount > loadedThroughPage ? reportedCount : undefined;
-  const nextOffset = offset + (rawItems.length > 0 ? rawItems.length : limit);
+  const nextOffset = nextOffsetFromPayload(payload) ?? offset + (rawItems.length > 0 ? rawItems.length : limit);
   const reachedRequestedLimit = rawItems.length >= limit;
 
   return {
@@ -1987,20 +1788,29 @@ function normalizeDatabaseAssetsPage(payload: unknown, limit: number, offset: nu
   };
 }
 
-function normalizeHostAssetsPage(payload: unknown, limit: number, offset: number): HostAssetPage {
-  const page = normalizeDatabaseAssetsPage(payload, limit, offset);
-  return {
-    ...page,
-    items: page.items
-  };
+function nextOffsetFromPayload(payload: unknown): number | undefined {
+  if (!isPlainObject(payload) || typeof payload.next !== "string" || payload.next.length === 0) {
+    return undefined;
+  }
+
+  try {
+    const value = new URL(payload.next, "https://jumpserver.invalid").searchParams.get("offset");
+    if (value && /^\d+$/.test(value)) {
+      const offset = Number(value);
+      return Number.isSafeInteger(offset) ? offset : undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
 }
 
-function normalizeDatabasePermedAccounts(payload: unknown): DatabasePermedAccount[] {
+function normalizePermittedAccounts(payload: unknown): PermittedAccount[] {
   const items =
     isPlainObject(payload) && Array.isArray(payload.permed_accounts)
       ? payload.permed_accounts
       : extractResultItems(payload);
-  return items.flatMap((item): DatabasePermedAccount[] => {
+  return items.flatMap((item): PermittedAccount[] => {
     if (!isPlainObject(item)) {
       return [];
     }
@@ -2023,7 +1833,7 @@ function extractResultItems(payload: unknown): unknown[] {
   return [];
 }
 
-function matchDatabaseAssets(assets: DatabaseAsset[], pattern: string | undefined): DatabaseAsset[] {
+function matchPermittedAssets<T extends { name: string }>(assets: T[], pattern: string | undefined): T[] {
   const trimmedPattern = pattern?.trim();
   if (!trimmedPattern) {
     return assets;
@@ -2038,11 +1848,28 @@ function matchDatabaseAssets(assets: DatabaseAsset[], pattern: string | undefine
   return assets.filter((asset) => matcher.test(asset.name));
 }
 
-function isLoadMoreDatabaseAssetsChoice(value: DatabaseAsset | LoadMoreDatabaseAssetsChoice): value is LoadMoreDatabaseAssetsChoice {
-  return isPlainObject(value) && value.type === "load-more";
+function collectNewPermittedAssets<TPermittedAsset extends PermittedAsset>(assets: TPermittedAsset[], seenIds: Set<string>): TPermittedAsset[] {
+  return assets.filter((asset) => {
+    if (seenIds.has(asset.id)) {
+      return false;
+    }
+    seenIds.add(asset.id);
+    return true;
+  });
 }
 
-function isLoadMoreHostAssetsChoice(value: HostAsset | LoadMoreHostAssetsChoice): value is LoadMoreHostAssetsChoice {
+function filterPermittedAssetPageForPattern<T extends PermittedAssetPage>(page: T, pattern: string | undefined): T {
+  if (!pattern || !hasGlobMeta(pattern)) {
+    return page;
+  }
+
+  return {
+    ...page,
+    items: matchPermittedAssets(page.items, pattern)
+  };
+}
+
+function isLoadMorePermittedAssetsChoice(value: PermittedAsset | LoadMorePermittedAssetsChoice): value is LoadMorePermittedAssetsChoice {
   return isPlainObject(value) && value.type === "load-more";
 }
 
@@ -2080,7 +1907,7 @@ function searchTextFromGlob(pattern: string | undefined): string | undefined {
     .map((segment) => segment.trim())
     .filter((segment) => segment.length > 0)
     .sort((left, right) => right.length - left.length);
-  return segments[0] ?? trimmed;
+  return segments[0];
 }
 
 function defaultDatabaseProtocol(asset: DatabaseAsset): string {
@@ -2143,7 +1970,7 @@ function extractLoginUsername(payload: unknown): string | undefined {
   return stringField(payload, "username") ?? stringField(payload, "email") ?? stringField(payload, "name");
 }
 
-function normalizeConnectionToken(payload: unknown): { id: string; expiresAt?: string; password?: string } {
+function normalizeConnectionToken(payload: unknown): ConnectionTokenCredential {
   if (!isPlainObject(payload)) {
     throw new Error("创建连接 token 的响应不是 JSON 对象");
   }
@@ -2181,7 +2008,7 @@ function extractClientUrl(payload: unknown): string {
 
 function extractDatabaseGuideConnection(
   jmsUrl: string,
-  token: { id: string; password?: string }
+  token: ConnectionTokenCredential
 ): DatabaseGuideConnection | undefined {
   const payload = decodeJmsClientUrl(jmsUrl);
   if (!isPlainObject(payload)) {
@@ -2217,7 +2044,7 @@ function extractDatabaseGuideConnection(
 
 function extractHostSshConnection(
   jmsUrl: string,
-  token: { id: string; password?: string },
+  token: ConnectionTokenCredential,
   input: {
     asset: HostAsset;
     accountUsername: string;
@@ -2322,15 +2149,11 @@ function shellWord(value: string): string {
   return /^[A-Za-z0-9_@%+=:,./#\-[\]]+$/.test(value) ? value : shellQuote(value);
 }
 
-function formatDatabaseAssetOption(asset: DatabaseAsset): string {
+function formatPermittedAssetOption(asset: PermittedAsset): string {
   return asset.address ? `${asset.name} (${asset.address})` : asset.name;
 }
 
-function formatHostAssetOption(asset: HostAsset): string {
-  return asset.address ? `${asset.name} (${asset.address})` : asset.name;
-}
-
-function formatHostAccountOption(account: DatabasePermedAccount): string {
+function formatHostAccountOption(account: PermittedAccount): string {
   return account.alias === account.username ? account.username : `${account.username} (${account.alias})`;
 }
 
@@ -2412,7 +2235,7 @@ function formatHostTokenTables(
 
 function formatDatabaseTokenTable(output: DatabaseTokenOutput, includeJmsUrl: boolean, terminalColumns: number): string {
   const rows: Array<[string, string]> = [
-    ["名称", formatDatabaseDisplayName(output.asset)],
+    ["名称", formatPermittedAssetOption(output.asset)],
     ["主机", formatTableValue(output.dbGuide?.host)],
     ["端口", formatTableValue(output.dbGuide?.port)],
     ["用户名", formatTableValue(output.dbGuide?.username)],
@@ -2430,7 +2253,7 @@ function formatDatabaseTokenTable(output: DatabaseTokenOutput, includeJmsUrl: bo
 
 function formatHostTokenTable(output: HostTokenOutput, includeJmsUrl: boolean, terminalColumns: number): string {
   const rows: Array<[string, string]> = [
-    ["名称", formatHostDisplayName(output.asset)],
+    ["名称", formatPermittedAssetOption(output.asset)],
     ["主机", formatTableValue(output.sshGuide?.host)],
     ["端口", formatTableValue(output.sshGuide?.port)],
     ["用户名", formatTableValue(output.sshGuide?.username)],
@@ -2446,14 +2269,6 @@ function formatHostTokenTable(output: HostTokenOutput, includeJmsUrl: boolean, t
     ...(includeJmsUrl ? [["JMS 连接地址", formatTableValue(output.jmsUrl)] as [string, string]] : [])
   ];
   return formatKeyValueTable(rows, terminalColumns);
-}
-
-function formatDatabaseDisplayName(asset: DatabaseTokenOutput["asset"]): string {
-  return asset.address ? `${asset.name} (${asset.address})` : asset.name;
-}
-
-function formatHostDisplayName(asset: HostTokenOutput["asset"]): string {
-  return asset.address ? `${asset.name} (${asset.address})` : asset.name;
 }
 
 function formatTableValue(value: unknown): string {
@@ -2516,17 +2331,24 @@ function formatDatabaseTokenOutputSeparator(terminalColumns: number): string {
   return "─".repeat(Math.max(10, terminalColumns));
 }
 
-function addRequestOptions(command: Command): void {
+function addRequestOptions(command: Command, operation?: ApiOperation): void {
   command
     .option("-p, --param <name=value>", "Path parameter if the name is in the path template, otherwise query", collect, [])
     .option("--path <name=value>", "Path parameter value", collect, [])
     .option("-q, --query <name=value>", "Deprecated; use operation-specific query options instead", collect, [])
-    .option("-H, --header <name=value>", "Extra request header", collect, [])
-    .option("--limit <number>", "Number of results to return for limit/offset paginated APIs")
-    .option("--offset <number>", "Initial result offset for limit/offset paginated APIs")
+    .option("-H, --header <name=value>", "Extra request header", collect, []);
+
+  if (!operation || operation.queryParameters.some((parameter) => parameter.name === "limit")) {
+    command.option("--limit <number>", "Number of results to return for limit/offset paginated APIs");
+  }
+  if (!operation || operation.queryParameters.some((parameter) => parameter.name === "offset")) {
+    command.option("--offset <number>", "Initial result offset for limit/offset paginated APIs");
+  }
+
+  command
     .option("-b, --body <json|@file|->", "JSON request body, @file, or - for stdin")
     .option("--dry-run", "Print a concise request preview without sending it")
-    .option("--include-headers", "Include response status and headers in output")
+    .option("--include-headers", "Include the HTTP status line in output")
     .option("--json", "Print raw JSON response");
 }
 
@@ -2540,35 +2362,6 @@ function addOperationQueryOptions(command: Command, operation: ApiOperation): vo
   for (const binding of operationQueryOptionBindings(operation)) {
     command.addOption(new Option(`--${binding.flagName} <value>`, `Query parameter: ${binding.parameterName}`));
   }
-}
-
-function operationQueryOptionBindings(operation: ApiOperation): QueryOptionBinding[] {
-  const usedFlagNames = new Set(RESERVED_REQUEST_OPTION_FLAGS);
-  const bindings: QueryOptionBinding[] = [];
-
-  for (const parameter of operation.queryParameters) {
-    const flagName = queryParameterFlagName(parameter.name);
-    if (!flagName || usedFlagNames.has(flagName)) {
-      continue;
-    }
-
-    usedFlagNames.add(flagName);
-    bindings.push({
-      parameterName: parameter.name,
-      flagName,
-      attributeName: new Option(`--${flagName} <value>`).attributeName()
-    });
-  }
-
-  return bindings;
-}
-
-function queryParameterFlagName(parameterName: string): string | undefined {
-  const flagName = parameterName
-    .replace(/[^A-Za-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .toLowerCase();
-  return flagName.length > 0 ? flagName : undefined;
 }
 
 function collect(value: string, previous: string[]): string[] {
@@ -2662,19 +2455,19 @@ function applyAuthHeaders(plan: RequestPlan, operation: ApiOperation, options: G
   const org = options.org;
   let authHeaders: Record<string, string> = {};
 
-  if (options.accessKeyId && options.accessKeySecret) {
+  if (options.authenticationMode.kind === "access-key") {
     authHeaders = buildSignedHeaders({
-      accessKeyId: options.accessKeyId,
-      accessKeySecret: options.accessKeySecret,
+      accessKeyId: options.authenticationMode.accessKeyId,
+      accessKeySecret: options.authenticationMode.accessKeySecret,
       method: operation.method,
       pathWithQuery: plan.pathWithQuery,
       now,
       ...(org ? { organizationId: org } : {})
     });
-  } else if (options.token) {
-    authHeaders = buildBearerHeaders(options.token, org);
-  } else if (options.privateToken) {
-    authHeaders = buildPrivateTokenHeaders(options.privateToken, org);
+  } else if (options.authenticationMode.kind === "bearer") {
+    authHeaders = buildBearerHeaders(options.authenticationMode.token, org);
+  } else if (options.authenticationMode.kind === "private-token") {
+    authHeaders = buildPrivateTokenHeaders(options.authenticationMode.token, org);
   } else if (org) {
     authHeaders = {
       Accept: "application/json",
@@ -2687,16 +2480,6 @@ function applyAuthHeaders(plan: RequestPlan, operation: ApiOperation, options: G
   }
 
   mergeHeadersCaseInsensitive(plan.headers, authHeaders);
-}
-
-function mergeHeadersCaseInsensitive(target: Record<string, string>, source: Record<string, string>): void {
-  const sourceNames = new Set(Object.keys(source).map((key) => key.toLowerCase()));
-  for (const key of Object.keys(target)) {
-    if (sourceNames.has(key.toLowerCase())) {
-      delete target[key];
-    }
-  }
-  Object.assign(target, source);
 }
 
 function formatDryRun(plan: RequestPlan): string {
@@ -3154,96 +2937,54 @@ async function selectFromTerminal<T>(message: string, choices: Array<SelectChoic
   return selected;
 }
 
-async function selectDatabaseAssetFromTerminal(
+async function selectPermittedAssetFromTerminal(
   message: string,
-  input: DatabaseAssetSelectionInput
-): Promise<DatabaseAsset[]> {
+  input: PermittedAssetSelectionInput,
+  policy: PermittedAssetSelectionPolicy
+): Promise<PermittedAsset[]> {
   if (!stdin.isTTY) {
-    throw new Error("Cannot select a database asset because stdin is not an interactive terminal.");
+    throw new Error(`Cannot select a ${policy.terminalName} because stdin is not an interactive terminal.`);
   }
 
-  let query = input.initialSearch;
-  let pageIndex = 0;
-  const offsets = [0];
-  const selectedAssets = new Map<string, DatabaseAsset>();
-
-  while (true) {
-    const offset = offsets[pageIndex] ?? pageIndex * input.pageSize;
-    const page = await input.fetchPage(query, offset);
-    offsets[pageIndex] = offset;
-    offsets[pageIndex + 1] = page.nextOffset;
-
-    if (page.items.length === 0) {
-      query = await promptDatabaseAssetSearch(query, "没有匹配的数据库实例，请输入新的搜索关键词");
-      pageIndex = 0;
-      offsets.length = 1;
-      offsets[0] = 0;
-      continue;
-    }
-
-    const pageSelection = await selectDatabaseAssetsWithClack(
-      message,
-      query,
-      pageIndex,
-      page,
-      input.pageSize,
-      selectedAssets
-    );
-    const selectedPageAssets = pageSelection.filter(isDatabaseAsset);
-    const pageSelectionIds = new Set(selectedPageAssets.map((asset) => asset.id));
-    for (const asset of page.items) {
-      if (pageSelectionIds.has(asset.id)) {
-        selectedAssets.set(asset.id, asset);
-      } else {
-        selectedAssets.delete(asset.id);
-      }
-    }
-
-    const action = pageSelection.find(isDatabaseAssetNavigationChoice);
-    if (action?.type === "previous") {
-      pageIndex = Math.max(0, pageIndex - 1);
-    } else if (action?.type === "next") {
-      pageIndex += 1;
-    } else if (action?.type === "search") {
-      query = await promptDatabaseAssetSearch(query, "搜索数据库实例");
-      pageIndex = 0;
-      offsets.length = 1;
-      offsets[0] = 0;
-      continue;
-    } else {
-      if (selectedAssets.size === 0) {
-        throw new Error("至少选择一个数据库实例");
-      }
-      return [...selectedAssets.values()];
-    }
-  }
+  return selectPermittedAssets(
+    input,
+    {
+      selectPage: (view) => selectPermittedAssetsWithClack(message, view),
+      promptSearch: ({ currentSearch, reason }) => promptPermittedAssetSearch(
+        currentSearch,
+        reason === "no-results"
+          ? `没有匹配的${policy.name}，请输入新的搜索关键词`
+          : `搜索${policy.name}`,
+        policy.searchPlaceholder
+      )
+    },
+    { requiredSelectionMessage: `至少选择一个${policy.name}` }
+  );
 }
 
-interface DatabaseAssetNavigationChoice {
+interface PermittedAssetNavigationChoice {
   type: "previous" | "next" | "search";
 }
 
-async function selectDatabaseAssetsWithClack(
+async function selectPermittedAssetsWithClack(
   message: string,
-  query: string | undefined,
-  pageIndex: number,
-  page: DatabaseAssetPage,
-  pageSize: number,
-  selectedAssets: ReadonlyMap<string, DatabaseAsset>
-): Promise<Array<DatabaseAsset | DatabaseAssetNavigationChoice>> {
+  view: PermittedAssetSelectionView
+): Promise<PermittedAssetPageSelection> {
+  const { search, pageIndex, page, pageSize, selectedAssets, hasPreviousPage } = view;
   const loadedCount = page.nextOffset;
   const totalPages = page.count === undefined ? undefined : Math.max(1, Math.ceil(page.count / pageSize));
   const pageLabel = totalPages === undefined ? `${pageIndex + 1}` : `${pageIndex + 1}/${totalPages}`;
   const countLabel = page.count === undefined ? `${loadedCount}` : `${Math.min(loadedCount, page.count)}/${page.count}`;
-  const selectedCountLabel = selectedAssets.size === 0 ? "未选择" : `已选择 ${selectedAssets.size}`;
-  const promptMessage = `${message}  搜索: ${query || "(空)"}  页: ${pageLabel}  已加载: ${countLabel}  ${selectedCountLabel}  按 / 搜索`;
-  const initialValues = page.items.filter((asset) => selectedAssets.has(asset.id));
-  const navigationChoices: Array<SelectChoice<DatabaseAssetNavigationChoice>> = [
-    ...(pageIndex > 0
+  const selectedCountLabel = selectedAssets.length === 0 ? "未选择" : `已选择 ${selectedAssets.length}`;
+  const promptMessage = `${message}  搜索: ${search || "(空)"}  页: ${pageLabel}  已加载: ${countLabel}  ${selectedCountLabel}  按 / 搜索`;
+  const selectedAssetIds = new Set(selectedAssets.map((asset) => asset.id));
+  const initialValues = page.items.filter((asset) => selectedAssetIds.has(asset.id));
+  const navigationChoices: Array<SelectChoice<PermittedAssetNavigationChoice>> = [
+    ...(hasPreviousPage
       ? [
           {
             label: "上一页",
-            value: { type: "previous" } as DatabaseAssetNavigationChoice
+            value: { type: "previous" } as PermittedAssetNavigationChoice
           }
         ]
       : []),
@@ -3251,7 +2992,7 @@ async function selectDatabaseAssetsWithClack(
       ? [
           {
             label: "下一页",
-            value: { type: "next" } as DatabaseAssetNavigationChoice
+            value: { type: "next" } as PermittedAssetNavigationChoice
           }
         ]
       : []),
@@ -3260,16 +3001,16 @@ async function selectDatabaseAssetsWithClack(
       value: { type: "search" }
     }
   ];
-  const choices: Array<SelectChoice<DatabaseAsset | DatabaseAssetNavigationChoice>> = [
+  const choices: Array<SelectChoice<PermittedAsset | PermittedAssetNavigationChoice>> = [
     ...page.items.map((asset) => ({
-      label: formatDatabaseAssetOption(asset),
+      label: formatPermittedAssetOption(asset),
       value: asset
     })),
     ...navigationChoices
   ];
-  const selected = await searchableClackMultiselect<DatabaseAsset | DatabaseAssetNavigationChoice>({
+  const selected = await searchableClackMultiselect<PermittedAsset | PermittedAssetNavigationChoice>({
     message: promptMessage,
-    options: choices as Parameters<typeof searchableClackMultiselect<DatabaseAsset | DatabaseAssetNavigationChoice>>[0]["options"],
+    options: choices as Parameters<typeof searchableClackMultiselect<PermittedAsset | PermittedAssetNavigationChoice>>[0]["options"],
     initialValues,
     input: stdin,
     output: processStderr,
@@ -3279,7 +3020,7 @@ async function selectDatabaseAssetsWithClack(
 
   if (selected === ASSET_SEARCH_SHORTCUT) {
     clearSubmittedPromptDisplay(processStderr, promptMessage, "/");
-    return [{ type: "search" }];
+    return { action: "search", selectedAssets: initialValues };
   }
 
   if (isCancel(selected)) {
@@ -3292,14 +3033,21 @@ async function selectDatabaseAssetsWithClack(
     promptMessage,
     selected.map((value) => choiceLabelForValue(choices, value)).join(", ") || "none"
   );
-  return selected;
+  return {
+    action: selected.find(isPermittedAssetNavigationChoice)?.type ?? "submit",
+    selectedAssets: selected.filter(isPermittedAsset)
+  };
 }
 
-async function promptDatabaseAssetSearch(currentSearch: string | undefined, message: string): Promise<string | undefined> {
+async function promptPermittedAssetSearch(
+  currentSearch: string | undefined,
+  message: string,
+  placeholder: string
+): Promise<string | undefined> {
   const nextSearch = await clackText({
     message,
     initialValue: currentSearch ?? "",
-    placeholder: "输入数据库名称关键词",
+    placeholder,
     input: stdin,
     output: processStderr
   });
@@ -3313,166 +3061,7 @@ async function promptDatabaseAssetSearch(currentSearch: string | undefined, mess
   return nextSearch.trim() || undefined;
 }
 
-async function selectHostAssetFromTerminal(
-  message: string,
-  input: HostAssetSelectionInput
-): Promise<HostAsset[]> {
-  if (!stdin.isTTY) {
-    throw new Error("Cannot select a host asset because stdin is not an interactive terminal.");
-  }
-
-  let query = input.initialSearch;
-  let pageIndex = 0;
-  const offsets = [0];
-  const selectedAssets = new Map<string, HostAsset>();
-
-  while (true) {
-    const offset = offsets[pageIndex] ?? pageIndex * input.pageSize;
-    const page = await input.fetchPage(query, offset);
-    offsets[pageIndex] = offset;
-    offsets[pageIndex + 1] = page.nextOffset;
-
-    if (page.items.length === 0) {
-      query = await promptHostAssetSearch(query, "没有匹配的主机，请输入新的搜索关键词");
-      pageIndex = 0;
-      offsets.length = 1;
-      offsets[0] = 0;
-      continue;
-    }
-
-    const pageSelection = await selectHostAssetsWithClack(
-      message,
-      query,
-      pageIndex,
-      page,
-      input.pageSize,
-      selectedAssets
-    );
-    const selectedPageAssets = pageSelection.filter(isHostAsset);
-    const pageSelectionIds = new Set(selectedPageAssets.map((asset) => asset.id));
-    for (const asset of page.items) {
-      if (pageSelectionIds.has(asset.id)) {
-        selectedAssets.set(asset.id, asset);
-      } else {
-        selectedAssets.delete(asset.id);
-      }
-    }
-
-    const action = pageSelection.find(isHostAssetNavigationChoice);
-    if (action?.type === "previous") {
-      pageIndex = Math.max(0, pageIndex - 1);
-    } else if (action?.type === "next") {
-      pageIndex += 1;
-    } else if (action?.type === "search") {
-      query = await promptHostAssetSearch(query, "搜索主机");
-      pageIndex = 0;
-      offsets.length = 1;
-      offsets[0] = 0;
-      continue;
-    } else {
-      if (selectedAssets.size === 0) {
-        throw new Error("至少选择一个主机");
-      }
-      return [...selectedAssets.values()];
-    }
-  }
-}
-
-interface HostAssetNavigationChoice {
-  type: "previous" | "next" | "search";
-}
-
-async function selectHostAssetsWithClack(
-  message: string,
-  query: string | undefined,
-  pageIndex: number,
-  page: HostAssetPage,
-  pageSize: number,
-  selectedAssets: ReadonlyMap<string, HostAsset>
-): Promise<Array<HostAsset | HostAssetNavigationChoice>> {
-  const loadedCount = page.nextOffset;
-  const totalPages = page.count === undefined ? undefined : Math.max(1, Math.ceil(page.count / pageSize));
-  const pageLabel = totalPages === undefined ? `${pageIndex + 1}` : `${pageIndex + 1}/${totalPages}`;
-  const countLabel = page.count === undefined ? `${loadedCount}` : `${Math.min(loadedCount, page.count)}/${page.count}`;
-  const selectedCountLabel = selectedAssets.size === 0 ? "未选择" : `已选择 ${selectedAssets.size}`;
-  const promptMessage = `${message}  搜索: ${query || "(空)"}  页: ${pageLabel}  已加载: ${countLabel}  ${selectedCountLabel}  按 / 搜索`;
-  const initialValues = page.items.filter((asset) => selectedAssets.has(asset.id));
-  const navigationChoices: Array<SelectChoice<HostAssetNavigationChoice>> = [
-    ...(pageIndex > 0
-      ? [
-          {
-            label: "上一页",
-            value: { type: "previous" } as HostAssetNavigationChoice
-          }
-        ]
-      : []),
-    ...(page.hasMore
-      ? [
-          {
-            label: "下一页",
-            value: { type: "next" } as HostAssetNavigationChoice
-          }
-        ]
-      : []),
-    {
-      label: "重新搜索",
-      value: { type: "search" }
-    }
-  ];
-  const choices: Array<SelectChoice<HostAsset | HostAssetNavigationChoice>> = [
-    ...page.items.map((asset) => ({
-      label: formatHostAssetOption(asset),
-      value: asset
-    })),
-    ...navigationChoices
-  ];
-  const selected = await searchableClackMultiselect<HostAsset | HostAssetNavigationChoice>({
-    message: promptMessage,
-    options: choices as Parameters<typeof searchableClackMultiselect<HostAsset | HostAssetNavigationChoice>>[0]["options"],
-    initialValues,
-    input: stdin,
-    output: processStderr,
-    maxItems: 20,
-    required: false
-  });
-
-  if (selected === ASSET_SEARCH_SHORTCUT) {
-    clearSubmittedPromptDisplay(processStderr, promptMessage, "/");
-    return [{ type: "search" }];
-  }
-
-  if (isCancel(selected)) {
-    clackCancel("已取消选择", { output: processStderr });
-    throw new Error("已取消选择");
-  }
-
-  clearSubmittedPromptDisplay(
-    processStderr,
-    promptMessage,
-    selected.map((value) => choiceLabelForValue(choices, value)).join(", ") || "none"
-  );
-  return selected;
-}
-
-async function promptHostAssetSearch(currentSearch: string | undefined, message: string): Promise<string | undefined> {
-  const nextSearch = await clackText({
-    message,
-    initialValue: currentSearch ?? "",
-    placeholder: "输入主机名称关键词",
-    input: stdin,
-    output: processStderr
-  });
-
-  if (isCancel(nextSearch)) {
-    clackCancel("已取消选择", { output: processStderr });
-    throw new Error("已取消选择");
-  }
-
-  clearSubmittedPromptDisplay(processStderr, message, nextSearch.trim());
-  return nextSearch.trim() || undefined;
-}
-
-function isDatabaseAssetNavigationChoice(value: unknown): value is DatabaseAssetNavigationChoice {
+function isPermittedAssetNavigationChoice(value: unknown): value is PermittedAssetNavigationChoice {
   return isPlainObject(value) && (
     value.type === "previous" ||
     value.type === "next" ||
@@ -3480,19 +3069,7 @@ function isDatabaseAssetNavigationChoice(value: unknown): value is DatabaseAsset
   );
 }
 
-function isHostAssetNavigationChoice(value: unknown): value is HostAssetNavigationChoice {
-  return isPlainObject(value) && (
-    value.type === "previous" ||
-    value.type === "next" ||
-    value.type === "search"
-  );
-}
-
-function isDatabaseAsset(value: unknown): value is DatabaseAsset {
-  return isPlainObject(value) && typeof value.id === "string" && typeof value.name === "string";
-}
-
-function isHostAsset(value: unknown): value is HostAsset {
+function isPermittedAsset(value: unknown): value is PermittedAsset {
   return isPlainObject(value) && typeof value.id === "string" && typeof value.name === "string";
 }
 

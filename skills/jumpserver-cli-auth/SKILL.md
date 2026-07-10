@@ -46,5 +46,7 @@ cat "$JMS_CONFIG"
 ## Notes
 
 - Runtime precedence is command-line flags, environment variables, then saved config.
+- Credentials are selected as one complete authentication mode from one source; Access Key fields are never combined across sources.
+- Incomplete Access Keys or multiple modes from the selected source fail explicitly.
 - `auth token --token-only` prints only the Bearer token for scripts.
 - Successful auth prints `认证完成` and should not expose secrets.

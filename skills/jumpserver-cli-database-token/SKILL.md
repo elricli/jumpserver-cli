@@ -23,6 +23,7 @@ jms assets databases token "prod-*" --all --limit 50
 ```
 
 `--all` fetches all matching permitted database assets without prompts. It uses each asset's permitted account alias from the asset detail API, not a guessed account name.
+Patterns use case-insensitive substring matching unless they contain `*` or `?`, in which case the complete asset name must match the glob.
 
 ## Script-Friendly Output
 

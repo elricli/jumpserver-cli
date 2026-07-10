@@ -62,10 +62,6 @@ export async function saveConfig(configPath: string, config: CliConfig): Promise
   await chmod(configPath, 0o600);
 }
 
-export function mergeConfig(existing: CliConfig, updates: CliConfig): CliConfig {
-  return stripUndefined({ ...existing, ...updates });
-}
-
 export function tokenConfig(updates: CliConfig & { token: string }): CliConfig {
   return stripUndefined({
     host: updates.host,

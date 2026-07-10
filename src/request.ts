@@ -30,10 +30,11 @@ export async function createRequestPlan(input: RequestPlanInput): Promise<Reques
     appendQueryValue(url, name, value);
   }
 
-  const headers: Record<string, string> = { ...(input.headers ?? {}) };
+  const headers: Record<string, string> = {};
+  mergeHeadersCaseInsensitive(headers, input.headers ?? {});
   const body = await resolveBodyInput(input.bodyInput, Boolean(input.operation.bodyRequired));
-  if (body !== undefined) {
-    headers["Content-Type"] ??= "application/json";
+  if (body !== undefined && !hasHeader(headers, "Content-Type")) {
+    headers["Content-Type"] = "application/json";
   }
 
   return {
@@ -43,6 +44,26 @@ export async function createRequestPlan(input: RequestPlanInput): Promise<Reques
     headers,
     ...(body !== undefined ? { body } : {})
   };
+}
+
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+  const normalizedName = name.toLowerCase();
+  return Object.keys(headers).some((headerName) => headerName.toLowerCase() === normalizedName);
+}
+
+export function mergeHeadersCaseInsensitive(
+  target: Record<string, string>,
+  source: Record<string, string>
+): void {
+  for (const [name, value] of Object.entries(source)) {
+    const normalizedName = name.toLowerCase();
+    for (const existingName of Object.keys(target)) {
+      if (existingName.toLowerCase() === normalizedName) {
+        delete target[existingName];
+      }
+    }
+    target[name] = value;
+  }
 }
 
 function substitutePathParameters(
@@ -57,7 +78,7 @@ function substitutePathParameters(
       throw new Error(`Missing required path parameter: ${parameter.name}`);
     }
 
-    path = path.replaceAll(`{${parameter.name}}`, encodeURIComponent(String(value)));
+    path = path.replaceAll(`{${parameter.name}}`, encodePathParameter(parameter.name, value));
   }
 
   const unresolved = path.match(/\{([^}]+)\}/);
@@ -66,6 +87,15 @@ function substitutePathParameters(
   }
 
   return path;
+}
+
+function encodePathParameter(name: string, value: string | number | boolean): string {
+  const serialized = String(value);
+  if (serialized === "." || serialized === "..") {
+    throw new Error(`Path parameter ${name} cannot be the URL dot segment "${serialized}"`);
+  }
+
+  return encodeURIComponent(serialized);
 }
 
 function buildUrl(baseUrl: string, basePath: string, operationPath: string): URL {

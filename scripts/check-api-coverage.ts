@@ -1,116 +1,77 @@
-import { buildProgram, operationCommandPath } from "../src/cli.js";
-import { loadOperations, resolveApiJsonPath } from "../src/openapi.js";
-import { readFileSync } from "node:fs";
 import type { Command } from "commander";
-
-interface RawOperation {
-  method: string;
-  path: string;
-  operationId: string;
-  parameters: Array<{ name: string; in: string }>;
-}
-
-interface RawSwaggerDocument {
-  paths?: Record<string, RawSwaggerPathItem>;
-}
-
-interface RawSwaggerPathItem {
-  parameters?: RawSwaggerParameter[];
-  [method: string]: RawSwaggerOperation | RawSwaggerParameter[] | undefined;
-}
-
-interface RawSwaggerOperation {
-  operationId?: string;
-  parameters?: RawSwaggerParameter[];
-}
-
-interface RawSwaggerParameter {
-  name?: string;
-  in?: string;
-}
-
-const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildProgram } from "../src/cli.js";
+import { operationCommandPath } from "../src/operation-command.js";
+import { loadOperations, type ApiOperation } from "../src/openapi.js";
+import { loadOperationsFromFile, resolveApiJsonPath } from "../src/openapi-parser.js";
+import { assessOperationCatalog } from "../src/openapi-toolchain.js";
 
 const operations = loadOperations();
-const program = buildProgram({ operations });
-const commandNames = new Set(program.commands.map((command) => command.name()));
-const rawOperations = tryLoadRawOperations();
-const rawOperationIds = new Set((rawOperations ?? []).map((operation) => operation.operationId));
-const loadedOperationIds = new Set(operations.map((operation) => operation.operationId));
-const missingLoadedOperations = rawOperations?.filter((operation) => !loadedOperationIds.has(operation.operationId)) ?? [];
-const extraLoadedOperations = rawOperations
-  ? operations.filter((operation) => !rawOperationIds.has(operation.operationId))
+const sourceOperations = tryLoadSourceOperations();
+const catalogAssessment = assessOperationCatalog(sourceOperations, operations);
+const duplicateCommandPaths = findDuplicateCommandPaths(operations);
+const program = duplicateCommandPaths.length === 0
+  ? buildProgram({
+      operations,
+      env: {},
+      configPath: join(tmpdir(), `jumpserver-cli-coverage-${process.pid}-${randomUUID()}.json`)
+    })
+  : undefined;
+const commandNames = new Set(program?.commands.map((command) => command.name()) ?? []);
+const missingHierarchicalCommands = program
+  ? operations
+      .filter((operation) => !findCommandPath(program, operationCommandPath(operation)))
+      .map((operation) => ({
+        operationId: operation.operationId,
+        commandPath: operationCommandPath(operation).join(" ")
+      }))
   : [];
-const missingHierarchicalCommands = operations
-  .filter((operation) => !findCommandPath(program, operationCommandPath(operation)))
-  .map((operation) => ({
-    operationId: operation.operationId,
-    commandPath: operationCommandPath(operation).join(" ")
-  }));
-const directOperationCommands = operations
-  .filter((operation) => commandNames.has(operation.operationId))
-  .map((operation) => operation.operationId);
-const unsupportedParameters =
-  rawOperations?.flatMap((operation) =>
-    operation.parameters
-      .filter((parameter) => !["query", "path", "body"].includes(parameter.in))
-      .map((parameter) => ({ ...operation, parameter }))
-  ) ?? [];
-const duplicateOperationIds = findDuplicates((rawOperations ?? []).map((operation) => operation.operationId));
-const missingOperationIds = rawOperations?.filter((operation) => operation.operationId.length === 0) ?? [];
+const directOperationCommands = program
+  ? operations
+      .filter((operation) => commandNames.has(operation.operationId))
+      .map((operation) => operation.operationId)
+  : [];
+const coveredCommandCount = program ? operations.length - missingHierarchicalCommands.length : 0;
+const hasCompleteCommandCoverage =
+  operations.length > 0 &&
+  missingHierarchicalCommands.length === 0 &&
+  duplicateCommandPaths.length === 0 &&
+  directOperationCommands.length === 0;
+const ok =
+  catalogAssessment.status !== "out-of-sync" &&
+  catalogAssessment.differences.length === 0 &&
+  hasCompleteCommandCoverage;
 
-if (
-  (rawOperations !== undefined && rawOperations.length !== 221) ||
-  operations.length !== 221 ||
-  missingLoadedOperations.length > 0 ||
-  extraLoadedOperations.length > 0 ||
-  missingHierarchicalCommands.length > 0 ||
-  directOperationCommands.length > 0 ||
-  unsupportedParameters.length > 0 ||
-  duplicateOperationIds.length > 0 ||
-  missingOperationIds.length > 0
-) {
-  console.error(
-    JSON.stringify(
-      {
-        ok: false,
-        rawOperationCount: rawOperations?.length,
-        expectedRawOperationCount: 221,
-        loadedOperationCount: operations.length,
-        coveredOperationCount: operations.length - missingHierarchicalCommands.length,
-        missingLoadedOperations,
-        extraLoadedOperations,
-        missingHierarchicalCommands,
-        directOperationCommands,
-        unsupportedParameters,
-        duplicateOperationIds,
-        missingOperationIds
-      },
-      null,
-      2
-    )
-  );
-  process.exitCode = 1;
+const report = {
+  ok,
+  rawApiJson: sourceOperations ? "checked" : "not present",
+  apiCatalogStatus: catalogAssessment.status,
+  ...(catalogAssessment.sourceOperationCount === undefined
+    ? {}
+    : { sourceOperationCount: catalogAssessment.sourceOperationCount }),
+  generatedOperationCount: catalogAssessment.generatedOperationCount,
+  coveredCommandCount,
+  commandCoverage: hasCompleteCommandCoverage ? "100%" : "incomplete",
+  ...(catalogAssessment.differences.length > 0
+    ? { operationCatalogDifferences: catalogAssessment.differences }
+    : {}),
+  ...(missingHierarchicalCommands.length > 0 ? { missingHierarchicalCommands } : {}),
+  ...(duplicateCommandPaths.length > 0 ? { duplicateCommandPaths } : {}),
+  ...(directOperationCommands.length > 0 ? { directOperationCommands } : {})
+};
+
+if (ok) {
+  console.log(JSON.stringify(report, null, 2));
 } else {
-  console.log(
-    JSON.stringify(
-      {
-        ok: true,
-        rawOperationCount: rawOperations?.length,
-        rawApiJson: rawOperations ? "checked" : "not present",
-        loadedOperationCount: operations.length,
-        coveredOperationCount: operations.length,
-        coverage: "100%"
-      },
-      null,
-      2
-    )
-  );
+  console.error(JSON.stringify(report, null, 2));
+  process.exitCode = 1;
 }
 
-function tryLoadRawOperations(): RawOperation[] | undefined {
+function tryLoadSourceOperations() {
   try {
-    return loadRawOperations(resolveApiJsonPath());
+    return loadOperationsFromFile(resolveApiJsonPath());
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes("Unable to locate api.json")) {
@@ -132,49 +93,24 @@ function findCommandPath(command: Command, path: string[]): Command | undefined 
   return current;
 }
 
-function loadRawOperations(apiPath: string): RawOperation[] {
-  const document = JSON.parse(readFileSync(apiPath, "utf8")) as RawSwaggerDocument;
-  const rawOperations: RawOperation[] = [];
+function findDuplicateCommandPaths(
+  sourceOperations: readonly ApiOperation[]
+): Array<{ commandPath: string; operationIds: string[] }> {
+  const operationsByPath = new Map<string, { commandPath: string; operationIds: string[] }>();
 
-  for (const [path, pathItem] of Object.entries(document.paths ?? {})) {
-    for (const [method, operation] of Object.entries(pathItem)) {
-      if (!HTTP_METHODS.has(method)) {
-        continue;
-      }
-
-      if (!operation || Array.isArray(operation)) {
-        rawOperations.push({
-          method: method.toUpperCase(),
-          path,
-          operationId: "",
-          parameters: normalizeParameters(pathItem.parameters ?? [])
-        });
-        continue;
-      }
-
-      rawOperations.push({
-        method: method.toUpperCase(),
-        path,
-        operationId: operation.operationId ?? "",
-        parameters: normalizeParameters([...(pathItem.parameters ?? []), ...(operation.parameters ?? [])])
+  for (const operation of sourceOperations) {
+    const path = operationCommandPath(operation);
+    const key = JSON.stringify(path);
+    const existing = operationsByPath.get(key);
+    if (existing) {
+      existing.operationIds.push(operation.operationId);
+    } else {
+      operationsByPath.set(key, {
+        commandPath: path.join(" "),
+        operationIds: [operation.operationId]
       });
     }
   }
 
-  return rawOperations;
-}
-
-function normalizeParameters(parameters: RawSwaggerParameter[]): Array<{ name: string; in: string }> {
-  return parameters.map((parameter) => ({
-    name: parameter.name ?? "",
-    in: parameter.in ?? ""
-  }));
-}
-
-function findDuplicates(values: string[]): string[] {
-  const counts = new Map<string, number>();
-  for (const value of values) {
-    counts.set(value, (counts.get(value) ?? 0) + 1);
-  }
-  return [...counts.entries()].filter(([, count]) => count > 1).map(([value]) => value);
+  return [...operationsByPath.values()].filter((entry) => entry.operationIds.length > 1);
 }

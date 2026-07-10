@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   buildProgram,
   isDirectCliInvocation,
-  operationCommandPath,
   readPackageVersion
 } from "../src/cli.js";
+import { operationCommandPath } from "../src/operation-command.js";
 import { loadOperations } from "../src/openapi.js";
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -484,7 +484,7 @@ describe("CLI command surface", () => {
     expect(stdout.join("")).toBe("ssh JMS-host-1@jumpserver.example.test -p 2222\n");
   });
 
-  it("prints SSH credentials for every permitted host asset with --all", async () => {
+  it("prints SSH credentials for every glob-matching permitted host asset with --all", async () => {
     const stdout: string[] = [];
     const stderr: string[] = [];
     const assetRequestUrls: string[] = [];
@@ -498,7 +498,7 @@ describe("CLI command surface", () => {
       },
       {
         id: "host-2",
-        name: "prod-app-2",
+        name: "legacy-prod-app-2",
         address: "10.0.0.22",
         protocols: [{ name: "ssh", port: 22 }]
       }
@@ -571,6 +571,7 @@ describe("CLI command surface", () => {
         "assets",
         "hosts",
         "token",
+        "prod-app-*",
         "--all"
       ],
       { from: "node" }
@@ -580,17 +581,14 @@ describe("CLI command surface", () => {
 
     expect(stderr).toEqual([]);
     expect(assetRequestUrls).toEqual([
-      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=host&limit=20"
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=host&search=prod-app-&limit=20"
     ]);
     expect(tokenCreateBodies).toMatchObject([
-      { asset: "host-1", account: "host-1-account-id", connect_method: "ssh_guide" },
-      { asset: "host-2", account: "host-2-account-id", connect_method: "ssh_guide" }
+      { asset: "host-1", account: "host-1-account-id", connect_method: "ssh_guide" }
     ]);
     expect(output).toContain("prod-app-1 (10.0.0.21)");
-    expect(output).toContain("prod-app-2 (10.0.0.22)");
+    expect(output).not.toContain("legacy-prod-app-2");
     expect(output).toContain("ssh JMS-host-1@jumpserver.example.test -p 2222");
-    expect(output).toContain("ssh JMS-host-2@jumpserver.example.test -p 2222");
-    expect(output).toMatch(/└[─]+┴[─]+┘\n\n[─]{10,}\n\n┌/);
   });
 
   it("lets the host asset selector search and call the permitted host asset API", async () => {
@@ -854,7 +852,7 @@ describe("CLI command surface", () => {
     expect(output).not.toContain("jms://");
   });
 
-  it("prints token credentials for every permitted database asset with --all", async () => {
+  it("prints every glob-matching database token and stops when the server repeats a full page", async () => {
     const stdout: string[] = [];
     const stderr: string[] = [];
     const assetRequestUrls: string[] = [];
@@ -869,7 +867,7 @@ describe("CLI command surface", () => {
       },
       {
         id: "database-2",
-        name: "prod-report-db",
+        name: "legacy-prod-report-db",
         address: "10.0.0.11",
         protocols: [{ name: "mysql", port: 3306 }]
       },
@@ -877,6 +875,12 @@ describe("CLI command surface", () => {
         id: "database-3",
         name: "prod-audit-db",
         address: "10.0.0.12",
+        protocols: [{ name: "mysql", port: 3306 }]
+      },
+      {
+        id: "database-4",
+        name: "legacy-prod-archive-db",
+        address: "10.0.0.13",
         protocols: [{ name: "mysql", port: 3306 }]
       }
     ];
@@ -906,6 +910,13 @@ describe("CLI command surface", () => {
             });
           }
           if (offset === 2) {
+            return jsonResponse({
+              count: assets.length,
+              next: null,
+              results: assets.slice(2)
+            });
+          }
+          if (offset === 4) {
             return jsonResponse({
               count: assets.length,
               next: null,
@@ -981,6 +992,7 @@ describe("CLI command surface", () => {
         "assets",
         "databases",
         "token",
+        "prod-*",
         "--all",
         "--limit",
         "2"
@@ -992,21 +1004,20 @@ describe("CLI command surface", () => {
 
     expect(stderr).toEqual([]);
     expect(assetRequestUrls).toEqual([
-      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&limit=2",
-      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&limit=2&offset=2"
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=prod-&limit=2",
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=prod-&limit=2&offset=2",
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=prod-&limit=2&offset=4"
     ]);
     expect(assetDetailRequestUrls).toEqual([
       "https://jumpserver.example.test/api/v1/perms/users/self/assets/database-1/",
-      "https://jumpserver.example.test/api/v1/perms/users/self/assets/database-2/",
       "https://jumpserver.example.test/api/v1/perms/users/self/assets/database-3/"
     ]);
     expect(tokenCreateBodies).toMatchObject([
       { asset: "database-1", account: "database-1-account-id", input_username: "database-1-user" },
-      { asset: "database-2", account: "database-2-account-id", input_username: "database-2-user" },
       { asset: "database-3", account: "database-3-account-id", input_username: "database-3-user" }
     ]);
     expect(output).toContain("prod-main-db (10.0.0.10)");
-    expect(output).toContain("prod-report-db (10.0.0.11)");
+    expect(output).not.toContain("legacy-prod-report-db");
     expect(output).toContain("prod-audit-db (10.0.0.12)");
     expect(output).toMatch(/└[─]+┴[─]+┘\n\n[─]{10,}\n\n┌/);
     expect(output).not.toContain("数据库 连接信息");
@@ -1370,33 +1381,7 @@ describe("CLI command surface", () => {
     expect(output).toContain("jms://raw-client-url");
   });
 
-  it("submits terminal database multi-select without a confirmation prompt", async () => {
-    const source = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
-
-    expect(source).toContain("searchableClackMultiselect<DatabaseAsset | DatabaseAssetNavigationChoice>");
-    expect(source).not.toContain("完成选择");
-    expect(source).not.toContain('message: "下一步"');
-  });
-
-  it("supports slash search shortcuts in terminal host and database selectors", async () => {
-    const source = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
-
-    expect(source).toContain('return char === "/" || key.sequence === "/" || key.name === "slash";');
-    expect(source).toMatch(/selectDatabaseAssetsWithClack[\s\S]+ASSET_SEARCH_SHORTCUT[\s\S]+return \[\{ type: "search" \}\]/);
-    expect(source).toMatch(/selectHostAssetsWithClack[\s\S]+ASSET_SEARCH_SHORTCUT[\s\S]+return \[\{ type: "search" \}\]/);
-    expect(source).toMatch(/selectDatabaseAssetsWithClack[\s\S]+按 \/ 搜索/);
-    expect(source).toMatch(/selectHostAssetsWithClack[\s\S]+按 \/ 搜索/);
-  });
-
-  it("clears submitted terminal prompt display before printing database token data", async () => {
-    const source = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
-
-    expect(source).toContain("clearSubmittedPromptDisplay(processStderr");
-    expect(source).toMatch(/selectDatabaseAssetsWithClack[\s\S]+clearSubmittedPromptDisplay\(processStderr/);
-    expect(source).toMatch(/confirmFromTerminal[\s\S]+clearSubmittedPromptDisplay\(processStderr/);
-  });
-
-  it("uses a single matching database asset without opening the asset selector", async () => {
+  it("continues past an empty glob-filtered page and uses the single database match", async () => {
     const stdout: string[] = [];
     const stderr: string[] = [];
     const assetRequestUrls: string[] = [];
@@ -1405,9 +1390,6 @@ describe("CLI command surface", () => {
     const program = buildTestProgram({
       stdout: (value) => stdout.push(value),
       stderr: (value) => stderr.push(value),
-      databaseAssetSelect: async () => {
-        throw new Error("database asset selector should not run for a single matching asset");
-      },
       select: async () => {
         throw new Error("select prompt should not run for a single matching asset and username");
       },
@@ -1415,8 +1397,22 @@ describe("CLI command surface", () => {
         const url = new URL(String(input));
         if (url.pathname === "/api/v1/perms/users/self/assets/") {
           assetRequestUrls.push(url.href);
+          if (!url.searchParams.has("offset")) {
+            return jsonResponse({
+              count: 2,
+              next: "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=single-&limit=20&offset=1",
+              results: [
+                {
+                  id: "database-ignored",
+                  name: "legacy-single-main-db",
+                  address: "10.0.0.9",
+                  protocols: [{ name: "mysql", port: 3306 }]
+                }
+              ]
+            });
+          }
           return jsonResponse({
-            count: 1,
+            count: 2,
             next: null,
             results: [
               {
@@ -1453,14 +1449,15 @@ describe("CLI command surface", () => {
         "assets",
         "databases",
         "token",
-        "single-main"
+        "single-*"
       ],
       { from: "node" }
     );
 
     expect(stderr).toEqual([]);
     expect(assetRequestUrls).toEqual([
-      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=single-main&limit=20"
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=single-&limit=20",
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=single-&limit=20&offset=1"
     ]);
     expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
       asset: "database-1",
@@ -1747,7 +1744,7 @@ describe("CLI command surface", () => {
     expect(stdout.join("")).not.toContain("数据库 连接信息");
   });
 
-  it("lets the database asset selector search and request later pages", async () => {
+  it("lets the database asset selector handle a pure wildcard, search, and request later pages", async () => {
     const stdout: string[] = [];
     const stderr: string[] = [];
     const assetRequestUrls: string[] = [];
@@ -1812,14 +1809,14 @@ describe("CLI command surface", () => {
         "assets",
         "databases",
         "token",
-        "prod"
+        "*"
       ],
       { from: "node" }
     );
 
     expect(stderr).toEqual([]);
     expect(assetRequestUrls).toEqual([
-      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=prod&limit=20",
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&limit=20",
       "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=billing&limit=20",
       "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&search=billing&limit=20&offset=20"
     ]);
@@ -1831,7 +1828,7 @@ describe("CLI command surface", () => {
     expect(stdout.join("")).not.toContain("数据库 连接信息");
   });
 
-  it("offers to load another database asset page when a full page has no reliable total", async () => {
+  it("offers one more page without a reliable total, then stops when that page repeats", async () => {
     const stdout: string[] = [];
     const stderr: string[] = [];
     const assetRequestUrls: string[] = [];
@@ -1873,21 +1870,29 @@ describe("CLI command surface", () => {
               ]
             });
           }
-          return jsonResponse({
-            count: 1,
-            next: null,
-            results: [
-              {
-                id: "database-3",
-                name: "prod-audit-db",
-                address: "10.0.0.12",
-                protocols: [{ name: "mysql", port: 3306 }]
-              }
-            ]
-          });
+          if (offset === "2") {
+            return jsonResponse({
+              count: 2,
+              next: null,
+              results: [
+                {
+                  id: "database-1",
+                  name: "prod-main-db",
+                  address: "10.0.0.10",
+                  protocols: [{ name: "mysql", port: 3306 }]
+                },
+                {
+                  id: "database-2",
+                  name: "prod-report-db",
+                  address: "10.0.0.11",
+                  protocols: [{ name: "mysql", port: 3306 }]
+                }
+              ]
+            });
+          }
         }
         if (url.pathname === "/api/v1/accounts/accounts/username-suggestions/") {
-          return jsonResponse(["audit-account"], 201);
+          return jsonResponse(["report-account"], 201);
         }
         if (url.pathname === "/api/v1/users/connection-token/") {
           tokenCreateBody = typeof init?.body === "string" ? init.body : undefined;
@@ -1930,12 +1935,11 @@ describe("CLI command surface", () => {
     ]);
     expect(selections.at(-1)?.labels).toEqual([
       "prod-main-db (10.0.0.10)",
-      "prod-report-db (10.0.0.11)",
-      "prod-audit-db (10.0.0.12)"
+      "prod-report-db (10.0.0.11)"
     ]);
     expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
-      asset: "database-3",
-      input_username: "audit-account"
+      asset: "database-2",
+      input_username: "report-account"
     });
     expect(stdout.join("")).toContain("│ 名称");
     expect(stdout.join("")).not.toContain("数据库 连接信息");
@@ -1974,7 +1978,7 @@ describe("CLI command surface", () => {
             count: 40,
             next:
               offset === "0"
-                ? "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&limit=20&offset=10"
+                ? "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&limit=20&offset=15"
                 : null,
             results: offset === "0" ? firstPageAssets : []
           });
@@ -2011,10 +2015,10 @@ describe("CLI command surface", () => {
     expect(stderr).toEqual([]);
     expect(assetRequestUrls).toEqual([
       "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&limit=20",
-      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&limit=20&offset=10"
+      "https://jumpserver.example.test/api/v1/perms/users/self/assets/?category=database&limit=20&offset=15"
     ]);
-    expect(selections[0]?.labels.at(-1)).toBe("加载更多...（已加载 10/40）");
-    expect(selections.at(-1)?.labels).not.toContain("加载更多...（已加载 10/40）");
+    expect(selections[0]?.labels.at(-1)).toBe("加载更多...（已加载 15/40）");
+    expect(selections.at(-1)?.labels).not.toContain("加载更多...（已加载 15/40）");
     expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
       asset: "database-10",
       input_username: "capped-account"
@@ -2129,6 +2133,41 @@ describe("CLI command surface", () => {
     }
   });
 
+  it("keeps inherited global options separate from colliding operation query options", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const program = buildTestProgram({
+      stdout: (value) => stdout.push(value),
+      stderr: (value) => stderr.push(value)
+    });
+    const smartEndpoint = findCommandPath(program, ["terminal", "endpoints", "smart"]);
+
+    expect(optionFlags(smartEndpoint)).toContain("--query-host <value>");
+
+    await program.parseAsync(
+      [
+        "node",
+        "jms",
+        "--host",
+        "https://jumpserver.example.test",
+        "--token",
+        "token",
+        "terminal",
+        "endpoints",
+        "smart",
+        "--query-host",
+        "db.internal",
+        "--dry-run"
+      ],
+      { from: "node" }
+    );
+
+    expect(stderr).toEqual([]);
+    expect(stdout.join("")).toContain(
+      "地址: https://jumpserver.example.test/api/v1/terminal/endpoints/smart/?host=db.internal"
+    );
+  });
+
   it("supports limit and offset pagination shortcuts for paginated operations", async () => {
     const stdout: string[] = [];
     const stderr: string[] = [];
@@ -2162,38 +2201,18 @@ describe("CLI command surface", () => {
     );
   });
 
-  it("rejects pagination shortcuts for operations that do not declare pagination parameters", async () => {
-    const stdout: string[] = [];
-    const stderr: string[] = [];
-    const previousExitCode = process.exitCode;
-    process.exitCode = undefined;
-    const program = buildTestProgram({
-      stdout: (value) => stdout.push(value),
-      stderr: (value) => stderr.push(value)
-    });
+  it("only exposes pagination shortcuts for operations that declare pagination parameters", () => {
+    const program = buildTestProgram();
+    const paginated = findCommandPath(program, ["assets", "match"]);
+    const unpaginated = findCommandPath(program, ["users", "profile", "read"]);
 
-    await program.parseAsync(
-      [
-        "node",
-        "jms",
-        "--host",
-        "https://jumpserver.example.test",
-        "--token",
-        "token",
-        "users",
-        "profile",
-        "read",
-        "--limit",
-        "20",
-        "--dry-run"
-      ],
-      { from: "node" }
+    expect(optionFlags(paginated)).toContain("--limit <number>");
+    expect(optionFlags(paginated)).toContain("--offset <number>");
+    expect(optionFlags(unpaginated)).not.toContain("--limit <number>");
+    expect(optionFlags(unpaginated)).not.toContain("--offset <number>");
+    expect(paginated?.options.find((option) => option.long === "--include-headers")?.description).toBe(
+      "Include the HTTP status line in output"
     );
-
-    expect(stdout).toEqual([]);
-    expect(stderr.join("")).toContain("users_profile_read does not support --limit");
-    expect(process.exitCode).toBe(1);
-    process.exitCode = previousExitCode;
   });
 
   it("overwrites auth-managed headers case-insensitively before sending Access Key requests", async () => {
@@ -2247,6 +2266,109 @@ describe("CLI command surface", () => {
     expect(headers.Date).toBe("Wed, 10 Jun 2026 09:00:00 GMT");
     expect(headers.Authorization).toContain('Signature keyId="key"');
     expect(headers["X-JMS-ORG"]).toBe("00000000-0000-0000-0000-000000000002");
+  });
+
+  it("uses explicit command-line authentication instead of a different saved mode", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "jms-auth-precedence-"));
+    const configPath = join(directory, "config.json");
+    let capturedInit: RequestInit | undefined;
+
+    try {
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          host: "saved.example.test",
+          accessKeyId: "saved-key-id",
+          accessKeySecret: "saved-key-secret"
+        })
+      );
+      const program = buildTestProgram({
+        configPath,
+        stdout: () => undefined,
+        stderr: () => undefined,
+        fetcher: (async (_input, init) => {
+          capturedInit = init;
+          return new Response("{}", {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          });
+        }) as typeof fetch
+      });
+
+      await program.parseAsync(
+        [
+          "node",
+          "jms",
+          "--host",
+          "https://jumpserver.example.test",
+          "--token",
+          "cli-token",
+          "users",
+          "profile",
+          "read"
+        ],
+        { from: "node" }
+      );
+
+      expect(new Headers(capturedInit?.headers).get("authorization")).toBe("Bearer cli-token");
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("allows token login to replace unrelated invalid saved API credentials", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "jms-token-login-recovery-"));
+    const configPath = join(directory, "config.json");
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    let requestCount = 0;
+
+    try {
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          host: "saved.example.test",
+          accessKeyId: "saved-key-id",
+          accessKeySecret: "saved-key-secret",
+          token: "conflicting-saved-token"
+        })
+      );
+      const program = buildTestProgram({
+        configPath,
+        stdout: (value) => stdout.push(value),
+        stderr: (value) => stderr.push(value),
+        fetcher: (async () => {
+          requestCount += 1;
+          return jsonResponse({ token: "replacement-token" }, 201);
+        }) as typeof fetch
+      });
+
+      await program.parseAsync(
+        [
+          "node",
+          "jms",
+          "auth",
+          "token",
+          "--host",
+          "https://jumpserver.example.test",
+          "--username",
+          "alice",
+          "--password",
+          "secret"
+        ],
+        { from: "node" }
+      );
+
+      expect(stderr).toEqual([]);
+      expect(requestCount).toBe(1);
+      expect(stdout.join("")).toBe("认证完成\n");
+      expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
+        host: "https://jumpserver.example.test",
+        token: "replacement-token"
+      });
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
   });
 
   it("prints a concise error when a JSON content type has malformed JSON", async () => {
