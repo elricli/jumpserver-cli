@@ -36,7 +36,8 @@ import {
 import { type ApiOperation, findOperation, loadOperations } from "./openapi.js";
 import {
   operationCommandPath,
-  operationQueryOptionBindings
+  operationQueryOptionBindings,
+  type QueryOptionBinding
 } from "./operation-command.js";
 import {
   createRequestPlan,
@@ -524,12 +525,16 @@ function registerOperationCommands(parent: Command, operations: ApiOperation[], 
     const path = operationCommandPath(operation);
     const operationCommand = getOrCreateCommandPath(parent, path);
     operationCommand.description(describeOperationCommand(operation));
-    operationCommand.action(async (commandOptions: RequestCommandOptions, command: Command) => {
-      await runOperation(operation, commandOptions, command, context);
-    });
     addRequestOptions(operationCommand, operation);
-    addOperationQueryOptions(operationCommand, operation);
-    operationCommand.addHelpText("after", operationHelpDetails(operation));
+    const queryOptionBindings = operationQueryOptionBindings(
+      operation,
+      registeredOptionFlagNames(operationCommand)
+    );
+    addOperationQueryOptions(operationCommand, queryOptionBindings);
+    operationCommand.action(async (commandOptions: RequestCommandOptions, command: Command) => {
+      await runOperation(operation, commandOptions, command, context, queryOptionBindings);
+    });
+    operationCommand.addHelpText("after", operationHelpDetails(operation, queryOptionBindings));
   }
 }
 
@@ -639,7 +644,10 @@ function actionPhrase(action: string, resource: string): string {
   }
 }
 
-function operationHelpDetails(operation: ApiOperation): string {
+function operationHelpDetails(
+  operation: ApiOperation,
+  queryOptionBindings: readonly QueryOptionBinding[]
+): string {
   return [
     "",
     "Details:",
@@ -648,7 +656,7 @@ function operationHelpDetails(operation: ApiOperation): string {
     `  Body: ${formatBodyHelp(operation)}`,
     "",
     "Example:",
-    `  jms ${operationCommandPath(operation).join(" ")}${exampleArguments(operation)}`
+    `  jms ${operationCommandPath(operation).join(" ")}${exampleArguments(operation, queryOptionBindings)}`
   ].join("\n");
 }
 
@@ -671,14 +679,16 @@ function formatSchemaReference(schema: NonNullable<ApiOperation["bodySchema"]>):
   return schema.ref ?? schema.type ?? "JSON";
 }
 
-function exampleArguments(operation: ApiOperation): string {
+function exampleArguments(
+  operation: ApiOperation,
+  queryOptionBindings: readonly QueryOptionBinding[]
+): string {
   const parts: string[] = [];
   for (const parameter of operation.pathParameters) {
     parts.push(`--path ${parameter.name}=value`);
   }
 
-  const queryOptions = operationQueryOptionBindings(operation);
-  const queryOption = queryOptions.find((option) => option.parameterName === "search") ?? queryOptions[0];
+  const queryOption = queryOptionBindings.find((option) => option.parameterName === "search") ?? queryOptionBindings[0];
   if (queryOption) {
     parts.push(`--${queryOption.flagName} value`);
   } else if (operation.queryParameters.some((parameter) => parameter.name === "limit")) {
@@ -866,13 +876,14 @@ async function runOperation(
   operation: ApiOperation,
   commandOptions: RequestCommandOptions,
   command: Command,
-  context: RunContext
+  context: RunContext,
+  queryOptionBindings: readonly QueryOptionBinding[] = []
 ): Promise<void> {
   try {
     const globalOptions = resolveGlobalOptions(command, context);
     const host = resolveRequiredHost(globalOptions.host);
     warnDeprecatedQueryOption(commandOptions, context);
-    const requestValues = collectRequestValues(operation, commandOptions);
+    const requestValues = collectRequestValues(operation, commandOptions, queryOptionBindings);
     const planInput = {
       operation,
       baseUrl: resolveBaseUrl(host),
@@ -2358,10 +2369,20 @@ function warnDeprecatedQueryOption(options: RequestCommandOptions, context: RunC
   }
 }
 
-function addOperationQueryOptions(command: Command, operation: ApiOperation): void {
-  for (const binding of operationQueryOptionBindings(operation)) {
+function addOperationQueryOptions(
+  command: Command,
+  queryOptionBindings: readonly QueryOptionBinding[]
+): void {
+  for (const binding of queryOptionBindings) {
     command.addOption(new Option(`--${binding.flagName} <value>`, `Query parameter: ${binding.parameterName}`));
   }
+}
+
+function registeredOptionFlagNames(command: Command): string[] {
+  const help = command.createHelp();
+  help.showGlobalOptions = true;
+  return [...help.visibleOptions(command), ...help.visibleGlobalOptions(command)]
+    .flatMap((option) => option.long ? [option.long.replace(/^--/, "")] : []);
 }
 
 function collect(value: string, previous: string[]): string[] {
@@ -2371,7 +2392,8 @@ function collect(value: string, previous: string[]): string[] {
 
 function collectRequestValues(
   operation: ApiOperation,
-  options: RequestCommandOptions
+  options: RequestCommandOptions,
+  queryOptionBindings: readonly QueryOptionBinding[]
 ): {
   pathValues: Record<string, string>;
   queryValues: Record<string, QueryValue>;
@@ -2392,7 +2414,7 @@ function collectRequestValues(
 
   Object.assign(pathValues, Object.fromEntries(parsePairs(options.path ?? [])));
   Object.assign(queryValues, Object.fromEntries(parsePairs(options.query ?? [])));
-  Object.assign(queryValues, collectOperationQueryOptionValues(operation, options));
+  Object.assign(queryValues, collectOperationQueryOptionValues(queryOptionBindings, options));
   applyPaginationShortcut(operation, queryParameterNames, queryValues, "limit", options.limit);
   applyPaginationShortcut(operation, queryParameterNames, queryValues, "offset", options.offset);
 
@@ -2404,12 +2426,12 @@ function collectRequestValues(
 }
 
 function collectOperationQueryOptionValues(
-  operation: ApiOperation,
+  queryOptionBindings: readonly QueryOptionBinding[],
   options: RequestCommandOptions
 ): Record<string, QueryValue> {
   const values: Record<string, QueryValue> = {};
 
-  for (const binding of operationQueryOptionBindings(operation)) {
+  for (const binding of queryOptionBindings) {
     const value = options[binding.attributeName];
     if (value !== undefined) {
       values[binding.parameterName] = String(value);
