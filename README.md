@@ -186,9 +186,7 @@ cat "$JMS_CONFIG"
 
 This repository publishes to npm from `.github/workflows/npm-publish.yml`. The workflow can run from a GitHub Release or be triggered manually from GitHub Actions.
 
-Required repository secret:
-
-- `NPM_TOKEN`: npm automation token from the npm account that owns the package.
+Publishing uses npm trusted publishing with GitHub Actions OIDC. The npm package trusts the `elricli/jumpserver-cli` repository and the `npm-publish.yml` workflow, so no long-lived npm publish token is required.
 
 ```bash
 npm run verify

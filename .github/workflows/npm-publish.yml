@@ -41,6 +41,11 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org/
 
+      - name: Install OIDC-capable npm
+        run: |
+          npm install --global npm@11.17.0
+          npm --version
+
       - name: Install dependencies
         run: npm ci
 
@@ -62,7 +67,6 @@ jobs:
 
       - name: Publish to npm
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
           INPUT_NPM_TAG: ${{ inputs['npm-tag'] }}
