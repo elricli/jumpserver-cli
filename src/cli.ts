@@ -544,8 +544,8 @@ function registerDatabaseTokenCommand(parent: Command, operations: ApiOperation[
     .command("token")
     .description("Create a database connection token")
     .argument("[pattern]", "Database instance name glob or substring")
-    .option("--account <name>", "JumpServer asset account name, defaults to a name derived from the asset")
-    .option("--input-username <username>", "Database username, defaults to an interactive suggestion")
+    .option("--account <name>", "JumpServer asset account alias/name, defaults to a permitted account")
+    .option("--input-username <username>", "Database username override, prompted when a manual-input account needs one")
     .option("--connect-method <method>", "JumpServer connection method", DEFAULT_DATABASE_CONNECT_METHOD)
     .option("--protocol <protocol>", "Database protocol, defaults to the selected asset protocol")
     .option("--all", "Create tokens for all matching permitted database assets without prompting")
@@ -762,6 +762,11 @@ type LoginRunContext = InteractiveRunContext;
 interface PermittedAccount {
   alias: string;
   username: string;
+}
+
+interface PermittedAssetAccess {
+  accounts: PermittedAccount[];
+  protocols?: unknown;
 }
 
 interface DatabaseTokenIdentity {
@@ -1015,8 +1020,16 @@ async function createDatabaseTokenOutput(
   operations: ApiOperation[],
   context: InteractiveRunContext
 ): Promise<DatabaseTokenOutput> {
-  const { account, inputUsername } = await resolveDatabaseTokenIdentity(asset, options, command, operations, context);
-  const protocol = options.protocol ?? defaultDatabaseProtocol(asset);
+  const access = await fetchPermittedAssetAccess(asset, command, context);
+  const { account, inputUsername } = await resolveDatabaseTokenIdentity(
+    asset,
+    options,
+    access.accounts,
+    command,
+    operations,
+    context
+  );
+  const protocol = options.protocol ?? defaultDatabaseProtocol(asset, access.protocols);
   const connectMethod = options.connectMethod ?? DEFAULT_DATABASE_CONNECT_METHOD;
   const { token, jmsUrl } = await createConnectionToken(
     {
@@ -1032,7 +1045,7 @@ async function createDatabaseTokenOutput(
     operations,
     context
   );
-  const dbGuide = extractDatabaseGuideConnection(jmsUrl, token);
+  const dbGuide = extractDatabaseGuideConnection(jmsUrl, token, protocol);
   const dsn = dbGuide ? formatDatabaseDsn(protocol, dbGuide) : undefined;
 
   return {
@@ -1134,6 +1147,7 @@ async function createConnectionToken(
 async function resolveDatabaseTokenIdentity(
   asset: DatabaseAsset,
   options: DatabaseTokenCommandOptions,
+  permittedAccounts: PermittedAccount[],
   command: Command,
   operations: ApiOperation[],
   context: InteractiveRunContext
@@ -1144,21 +1158,15 @@ async function resolveDatabaseTokenIdentity(
     return { account: options.account, inputUsername };
   }
 
-  if (options.all) {
-    const account = await chooseDatabasePermittedAccount(asset, command, context);
-    if (options.inputUsername) {
-      return { account: account.alias, inputUsername: options.inputUsername };
-    }
-    if (account.alias === "@INPUT") {
-      const inputUsername = await chooseDatabaseInputUsername(asset, command, operations, context, false);
-      return { account: account.alias, inputUsername };
-    }
-    return { account: account.alias, inputUsername: account.username };
+  const account = chooseDatabasePermittedAccount(asset, permittedAccounts);
+  if (options.inputUsername) {
+    return { account: account.alias, inputUsername: options.inputUsername };
   }
-
-  const inputUsername =
-    options.inputUsername ?? (await chooseDatabaseInputUsername(asset, command, operations, context));
-  return { account: defaultDatabaseAccountName(asset.name), inputUsername };
+  if (account.alias === "@INPUT") {
+    const inputUsername = await chooseDatabaseInputUsername(asset, command, operations, context, !options.all);
+    return { account: account.alias, inputUsername };
+  }
+  return { account: account.alias, inputUsername: account.username };
 }
 
 async function resolveHostTokenIdentity(
@@ -1181,12 +1189,10 @@ async function resolveHostTokenIdentity(
   };
 }
 
-async function chooseDatabasePermittedAccount(
+function chooseDatabasePermittedAccount(
   asset: DatabaseAsset,
-  command: Command,
-  context: RunContext
-): Promise<PermittedAccount> {
-  const accounts = await fetchPermittedAccounts(asset, command, context);
+  accounts: PermittedAccount[]
+): PermittedAccount {
   const account = accounts.find((item) => !item.alias.startsWith("@")) ?? accounts.find((item) => item.alias === "@INPUT") ?? accounts[0];
   if (!account) {
     throw new Error(`数据库实例没有可用授权账号: ${asset.name}`);
@@ -1200,7 +1206,7 @@ async function chooseHostPermittedAccount(
   context: InteractiveRunContext,
   allowInteractiveSelection: boolean
 ): Promise<PermittedAccount> {
-  const accounts = await fetchPermittedAccounts(asset, command, context);
+  const { accounts } = await fetchPermittedAssetAccess(asset, command, context);
   const nonVirtualAccounts = accounts.filter((item) => !item.alias.startsWith("@"));
   const candidates = nonVirtualAccounts.length > 0 ? nonVirtualAccounts : accounts;
   if (candidates.length === 0) {
@@ -1413,18 +1419,24 @@ async function fetchPermittedAssetsPage(
   return normalizePermittedAssetPage(payload, limit, offset);
 }
 
-async function fetchPermittedAccounts(
+async function fetchPermittedAssetAccess(
   asset: PermittedAsset,
   command: Command,
   context: RunContext
-): Promise<PermittedAccount[]> {
+): Promise<PermittedAssetAccess> {
   const payload = await callOperationJson({
     operation: PERMITTED_ASSET_DETAIL_OPERATION,
     command,
     context,
     pathValues: { id: asset.id }
   });
-  return normalizePermittedAccounts(payload);
+  const protocols = isPlainObject(payload)
+    ? payload.permed_protocols ?? payload.protocols
+    : undefined;
+  return {
+    accounts: normalizePermittedAccounts(payload),
+    ...(protocols !== undefined ? { protocols } : {})
+  };
 }
 
 async function selectPermittedAssetPage(
@@ -1921,14 +1933,20 @@ function searchTextFromGlob(pattern: string | undefined): string | undefined {
   return segments[0];
 }
 
-function defaultDatabaseProtocol(asset: DatabaseAsset): string {
-  if (Array.isArray(asset.protocols)) {
-    const protocol = asset.protocols.find((item) => isPlainObject(item) && typeof item.name === "string");
-    if (isPlainObject(protocol) && typeof protocol.name === "string") {
-      return protocol.name;
-    }
+function defaultDatabaseProtocol(asset: DatabaseAsset, permittedProtocols?: unknown): string {
+  const protocol = firstProtocolName(permittedProtocols) ?? firstProtocolName(asset.protocols);
+  if (!protocol) {
+    throw new Error(`无法识别数据库协议: ${asset.name}，请使用 --protocol 指定`);
   }
-  return "mysql";
+  return protocol;
+}
+
+function firstProtocolName(protocols: unknown): string | undefined {
+  if (!Array.isArray(protocols)) {
+    return undefined;
+  }
+  const protocol = protocols.find((item) => isPlainObject(item) && typeof item.name === "string");
+  return isPlainObject(protocol) && typeof protocol.name === "string" ? protocol.name : undefined;
 }
 
 function defaultHostProtocol(asset: HostAsset): string {
@@ -1943,17 +1961,6 @@ function defaultHostProtocol(asset: HostAsset): string {
     }
   }
   return "ssh";
-}
-
-function defaultDatabaseAccountName(assetName: string): string {
-  const suffixMatch = assetName.match(/^(.*?)(\(([^)]*)\))$/);
-  if (suffixMatch) {
-    const baseName = suffixMatch[1]!;
-    const suffix = suffixMatch[2]!;
-    const suffixText = suffixMatch[3]!;
-    return suffixText ? `${baseName}-账号${suffix}` : `${baseName}-账号`;
-  }
-  return `${assetName}-账号`;
 }
 
 function extractAccountNames(payload: unknown): string[] {
@@ -2019,7 +2026,8 @@ function extractClientUrl(payload: unknown): string {
 
 function extractDatabaseGuideConnection(
   jmsUrl: string,
-  token: ConnectionTokenCredential
+  token: ConnectionTokenCredential,
+  protocol: string
 ): DatabaseGuideConnection | undefined {
   const payload = decodeJmsClientUrl(jmsUrl);
   if (!isPlainObject(payload)) {
@@ -2027,6 +2035,8 @@ function extractDatabaseGuideConnection(
   }
 
   const endpoint = plainObjectField(payload, "endpoint");
+  const assetPayload = plainObjectField(payload, "asset");
+  const assetInfo = assetPayload ? plainObjectField(assetPayload, "info") : undefined;
   const tokenPayload = plainObjectField(payload, "token");
   const host = endpoint ? stringField(endpoint, "host") : undefined;
   const port = endpoint ? numberField(endpoint, "port") : undefined;
@@ -2037,7 +2047,8 @@ function extractDatabaseGuideConnection(
     stringField(payload, "database") ??
     stringField(payload, "db") ??
     stringField(payload, "db_name") ??
-    (endpoint ? stringField(endpoint, "database") ?? stringField(endpoint, "db") ?? stringField(endpoint, "db_name") : undefined);
+    (endpoint ? stringField(endpoint, "database") ?? stringField(endpoint, "db") ?? stringField(endpoint, "db_name") : undefined) ??
+    (assetInfo ? stringField(assetInfo, "database") ?? stringField(assetInfo, "db") ?? stringField(assetInfo, "db_name") : undefined);
 
   if (!host || port === undefined || !username || !password) {
     return undefined;
@@ -2049,7 +2060,7 @@ function extractDatabaseGuideConnection(
     username,
     password,
     ...(database ? { database } : {}),
-    command: formatMysqlGuideCommand(host, port, username, password)
+    command: formatDatabaseGuideCommand(protocol, host, port, username, password, database)
   };
 }
 
@@ -2134,7 +2145,28 @@ function numberField(payload: Record<string, unknown>, key: string): number | un
   return undefined;
 }
 
-function formatMysqlGuideCommand(host: string, port: number, username: string, password: string): string {
+function formatDatabaseGuideCommand(
+  protocol: string,
+  host: string,
+  port: number,
+  username: string,
+  password: string,
+  database?: string
+): string {
+  if (["postgres", "postgresql"].includes(protocol.toLowerCase())) {
+    return [
+      `PGPASSWORD=${shellQuote(password)}`,
+      "psql",
+      "-h",
+      shellQuote(host),
+      "-p",
+      String(port),
+      "-U",
+      shellQuote(username),
+      ...(database ? ["-d", shellQuote(database)] : [])
+    ].join(" ");
+  }
+
   return [
     `MYSQL_PWD=${shellQuote(password)}`,
     "mysql",

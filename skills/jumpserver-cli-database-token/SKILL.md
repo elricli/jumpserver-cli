@@ -13,7 +13,7 @@ Use `jms assets databases token` to create temporary connection credentials for 
 jms assets databases token "prod-*"
 ```
 
-The command searches permitted database assets, lets the user select assets and usernames when needed, and prints connection tables.
+The command searches permitted database assets, resolves each selected asset's permitted account alias and protocol from its permission detail, asks for a username only when a manual-input account needs one, and prints protocol-specific connection commands.
 
 ## Non-Interactive All Assets
 
@@ -22,7 +22,7 @@ jms assets databases token --all
 jms assets databases token "prod-*" --all --limit 50
 ```
 
-`--all` fetches all matching permitted database assets without prompts. It uses each asset's permitted account alias from the asset detail API, not a guessed account name.
+`--all` fetches all matching permitted database assets without prompts. All database token modes use each asset's permitted account alias and permitted protocol from the asset detail API instead of guessing either value.
 Patterns use case-insensitive substring matching unless they contain `*` or `?`, in which case the complete asset name must match the glob.
 
 ## Script-Friendly Output

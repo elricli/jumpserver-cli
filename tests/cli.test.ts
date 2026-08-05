@@ -718,6 +718,13 @@ describe("CLI command surface", () => {
         if (path === "/api/v1/perms/users/self/assets/") {
           return jsonResponse({ count: selectedAssets.length, results: selectedAssets });
         }
+        const permittedAccountResponse = databasePermittedAccountResponse(
+          path,
+          (assetId) => assetId === "database-1" ? "main-user" : "report-user"
+        );
+        if (permittedAccountResponse) {
+          return permittedAccountResponse;
+        }
         if (path === "/api/v1/accounts/accounts/username-suggestions/") {
           const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { assets?: string[] };
           return jsonResponse([body.assets?.[0] === "database-1" ? "main-user" : "report-user"], 201);
@@ -785,14 +792,11 @@ describe("CLI command surface", () => {
     ).map((request) => JSON.parse(request.body ?? "{}"));
 
     expect(stderr).toEqual([]);
-    expect(usernameSuggestionBodies).toEqual([
-      { username: "", assets: ["database-1"] },
-      { username: "", assets: ["database-2"] }
-    ]);
+    expect(usernameSuggestionBodies).toEqual([]);
     expect(tokenCreateBodies).toMatchObject([
       {
         asset: "database-1",
-        account: "prod-main-db-账号",
+        account: "database-1-account-id",
         input_username: "main-user",
         connect_options: {
           reusable: false
@@ -800,7 +804,7 @@ describe("CLI command surface", () => {
       },
       {
         asset: "database-2",
-        account: "prod-report-db-账号",
+        account: "database-2-account-id",
         input_username: "report-user",
         connect_options: {
           reusable: false
@@ -1043,6 +1047,10 @@ describe("CLI command surface", () => {
         if (path === "/api/v1/perms/users/self/assets/") {
           return jsonResponse({ count: 1, next: null, results: [selectedAsset] });
         }
+        const permittedAccountResponse = databasePermittedAccountResponse(path, "stream-user");
+        if (permittedAccountResponse) {
+          return permittedAccountResponse;
+        }
         if (path === "/api/v1/accounts/accounts/username-suggestions/") {
           return jsonResponse(["stream-user"], 201);
         }
@@ -1112,6 +1120,10 @@ describe("CLI command surface", () => {
         const path = new URL(String(input)).pathname;
         if (path === "/api/v1/perms/users/self/assets/") {
           return jsonResponse({ count: 1, next: null, results: [selectedAsset] });
+        }
+        const permittedAccountResponse = databasePermittedAccountResponse(path, "main-user");
+        if (permittedAccountResponse) {
+          return permittedAccountResponse;
         }
         if (path === "/api/v1/accounts/accounts/username-suggestions/") {
           return jsonResponse(["main-user"], 201);
@@ -1185,6 +1197,10 @@ describe("CLI command surface", () => {
         const path = new URL(String(input)).pathname;
         if (path === "/api/v1/perms/users/self/assets/") {
           return jsonResponse({ count: 1, next: null, results: [selectedAsset] });
+        }
+        const permittedAccountResponse = databasePermittedAccountResponse(path, "main-user");
+        if (permittedAccountResponse) {
+          return permittedAccountResponse;
         }
         if (path === "/api/v1/accounts/accounts/username-suggestions/") {
           return jsonResponse(["main-user"], 201);
@@ -1260,6 +1276,13 @@ describe("CLI command surface", () => {
         const path = new URL(String(input)).pathname;
         if (path === "/api/v1/perms/users/self/assets/") {
           return jsonResponse({ count: selectedAssets.length, results: selectedAssets });
+        }
+        const permittedAccountResponse = databasePermittedAccountResponse(
+          path,
+          (assetId) => assetId === "database-1" ? "main-user" : "report-user"
+        );
+        if (permittedAccountResponse) {
+          return permittedAccountResponse;
         }
         if (path === "/api/v1/accounts/accounts/username-suggestions/") {
           const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { assets?: string[] };
@@ -1345,6 +1368,10 @@ describe("CLI command surface", () => {
             ]
           });
         }
+        const permittedAccountResponse = databasePermittedAccountResponse(path, "prod-user");
+        if (permittedAccountResponse) {
+          return permittedAccountResponse;
+        }
         if (path === "/api/v1/accounts/accounts/username-suggestions/") {
           return jsonResponse(["prod-user"], 201);
         }
@@ -1379,6 +1406,114 @@ describe("CLI command surface", () => {
     expect(stderr).toEqual([]);
     expect(output).toContain("JMS 连接地址");
     expect(output).toContain("jms://raw-client-url");
+  });
+
+  it("uses the permitted account alias for a selected database token", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const assetDetailRequestUrls: string[] = [];
+    let tokenCreateBody: Record<string, unknown> | undefined;
+    const previousExitCode = process.exitCode;
+    const selectedAsset = {
+      id: "database-ai-business",
+      name: "PostgreSQL-AI业务pg(postgres-bs8jr76o)",
+      address: "10.0.36.2"
+    };
+
+    process.exitCode = undefined;
+    try {
+      const program = buildTestProgram({
+        terminalColumns: 200,
+        stdout: (value) => stdout.push(value),
+        stderr: (value) => stderr.push(value),
+        select: async () => {
+          throw new Error("select prompt should not run for a single asset, account, and username");
+        },
+        fetcher: (async (input, init) => {
+          const url = new URL(String(input));
+          if (url.pathname === "/api/v1/perms/users/self/assets/") {
+            return jsonResponse({ count: 1, next: null, results: [selectedAsset] });
+          }
+          if (url.pathname === "/api/v1/perms/users/self/assets/database-ai-business/") {
+            assetDetailRequestUrls.push(url.href);
+            return jsonResponse({
+              id: selectedAsset.id,
+              permed_protocols: [{ name: "postgresql", port: 5432 }],
+              permed_accounts: [
+                {
+                  id: "database-account-id",
+                  alias: "database-account-alias",
+                  name: "AI业务pg-账号",
+                  username: "ai_business",
+                  has_secret: true
+                }
+              ]
+            });
+          }
+          if (url.pathname === "/api/v1/accounts/accounts/username-suggestions/") {
+            return jsonResponse(["ai_business"], 201);
+          }
+          if (url.pathname === "/api/v1/users/connection-token/") {
+            tokenCreateBody = JSON.parse(typeof init?.body === "string" ? init.body : "{}");
+            if (tokenCreateBody?.account !== "database-account-alias") {
+              return jsonResponse({ detail: "账号未找到" }, 404);
+            }
+            return jsonResponse({ id: "connection-token-ai", value: "ai-password" }, 201);
+          }
+          if (url.pathname === "/api/v1/users/connection-token/connection-token-ai/client-url/") {
+            return jsonResponse({
+              url: jmsUrl({
+                id: "connection-token-ai",
+                value: "ai-password",
+                protocol: "postgresql",
+                token: { id: "connection-token-ai", value: "ai-password" },
+                asset: { info: { db_name: "db_init" } },
+                endpoint: { host: "jumpserver.example.test", port: 33061 }
+              })
+            });
+          }
+          return jsonResponse({ detail: `Unexpected request: ${url.pathname}` }, 404);
+        }) as typeof fetch
+      });
+
+      await program.parseAsync(
+        [
+          "node",
+          "jms",
+          "--host",
+          "https://jumpserver.example.test",
+          "--token",
+          "auth-token",
+          "assets",
+          "databases",
+          "token",
+          "AI业务pg",
+          "--reusable"
+        ],
+        { from: "node" }
+      );
+
+      expect(tokenCreateBody).toMatchObject({
+        asset: "database-ai-business",
+        account: "database-account-alias",
+        protocol: "postgresql",
+        input_username: "ai_business",
+        connect_options: { reusable: true }
+      });
+      expect(assetDetailRequestUrls).toEqual([
+        "https://jumpserver.example.test/api/v1/perms/users/self/assets/database-ai-business/"
+      ]);
+      expect(stderr).toEqual([]);
+      expect(stdout.join("")).toContain("PostgreSQL-AI业务pg(postgres-bs8jr76o) (10.0.36.2)");
+      expect(stdout.join("")).toContain("│ 协议");
+      expect(stdout.join("")).toContain("postgresql");
+      expect(stdout.join("")).toContain("db_init");
+      expect(stdout.join("")).toContain("PGPASSWORD='ai-password' psql");
+      expect(stdout.join("")).toContain("-d 'db_init'");
+      expect(stdout.join("")).not.toContain("MYSQL_PWD=");
+    } finally {
+      process.exitCode = previousExitCode;
+    }
   });
 
   it("continues past an empty glob-filtered page and uses the single database match", async () => {
@@ -1424,6 +1559,10 @@ describe("CLI command surface", () => {
             ]
           });
         }
+        const permittedAccountResponse = databasePermittedAccountResponse(url.pathname, "single-user");
+        if (permittedAccountResponse) {
+          return permittedAccountResponse;
+        }
         if (url.pathname === "/api/v1/accounts/accounts/username-suggestions/") {
           return jsonResponse(["single-user"], 201);
         }
@@ -1461,13 +1600,13 @@ describe("CLI command surface", () => {
     ]);
     expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
       asset: "database-1",
-      account: "single-main-db-账号",
+      account: "database-1-account-id",
       input_username: "single-user"
     });
     expect(stdout.join("")).toContain("single-main-db (10.0.0.10)");
   });
 
-  it("uses keyboard-style selection when the token command matches multiple assets or usernames", async () => {
+  it("uses keyboard-style selection when the token command matches multiple assets or manual usernames", async () => {
     const stdout: string[] = [];
     const stderr: string[] = [];
     const selections: Array<{ message: string; labels: string[] }> = [];
@@ -1503,6 +1642,19 @@ describe("CLI command surface", () => {
                 name: "prod-report-db",
                 address: "10.0.0.11",
                 protocols: [{ name: "mysql", port: 3306 }]
+              }
+            ]
+          });
+        }
+        if (path === "/api/v1/perms/users/self/assets/database-2/") {
+          return jsonResponse({
+            id: "database-2",
+            permed_accounts: [
+              {
+                alias: "@INPUT",
+                name: "Manual input",
+                username: "Manual input",
+                has_secret: false
               }
             ]
           });
@@ -1550,7 +1702,7 @@ describe("CLI command surface", () => {
     ]);
     expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
       asset: "database-2",
-      account: "prod-report-db-账号",
+      account: "@INPUT",
       input_username: "report-account"
     });
   });
@@ -1607,6 +1759,10 @@ describe("CLI command surface", () => {
               }
             ]
           });
+        }
+        const permittedAccountResponse = databasePermittedAccountResponse(url.pathname, "audit-account");
+        if (permittedAccountResponse) {
+          return permittedAccountResponse;
         }
         if (url.pathname === "/api/v1/accounts/accounts/username-suggestions/") {
           return jsonResponse(["audit-account"], 201);
@@ -1665,7 +1821,7 @@ describe("CLI command surface", () => {
     ]);
     expect(JSON.parse(tokenCreateBody ?? "{}")).toMatchObject({
       asset: "database-3",
-      account: "prod-audit-db-账号",
+      account: "database-3-account-id",
       input_username: "audit-account"
     });
     expect(stdout.join("")).toContain("│ 名称");
@@ -1699,6 +1855,10 @@ describe("CLI command surface", () => {
               }
             ]
           });
+        }
+        const permittedAccountResponse = databasePermittedAccountResponse(url.pathname, "permed-account");
+        if (permittedAccountResponse) {
+          return permittedAccountResponse;
         }
         if (url.pathname === "/api/v1/accounts/accounts/username-suggestions/") {
           return jsonResponse(["permed-account"], 201);
@@ -1783,6 +1943,10 @@ describe("CLI command surface", () => {
               }
             ]
           });
+        }
+        const permittedAccountResponse = databasePermittedAccountResponse(url.pathname, "billing-account");
+        if (permittedAccountResponse) {
+          return permittedAccountResponse;
         }
         if (url.pathname === "/api/v1/accounts/accounts/username-suggestions/") {
           return jsonResponse(["billing-account"], 201);
@@ -1891,6 +2055,10 @@ describe("CLI command surface", () => {
             });
           }
         }
+        const permittedAccountResponse = databasePermittedAccountResponse(url.pathname, "report-account");
+        if (permittedAccountResponse) {
+          return permittedAccountResponse;
+        }
         if (url.pathname === "/api/v1/accounts/accounts/username-suggestions/") {
           return jsonResponse(["report-account"], 201);
         }
@@ -1982,6 +2150,10 @@ describe("CLI command surface", () => {
                 : null,
             results: offset === "0" ? firstPageAssets : []
           });
+        }
+        const permittedAccountResponse = databasePermittedAccountResponse(url.pathname, "capped-account");
+        if (permittedAccountResponse) {
+          return permittedAccountResponse;
         }
         if (url.pathname === "/api/v1/accounts/accounts/username-suggestions/") {
           return jsonResponse(["capped-account"], 201);
@@ -3032,6 +3204,31 @@ function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
     status,
     headers: { "content-type": "application/json" }
+  });
+}
+
+function databasePermittedAccountResponse(
+  path: string,
+  username: string | ((assetId: string) => string)
+): Response | undefined {
+  const match = path.match(/^\/api\/v1\/perms\/users\/self\/assets\/([^/]+)\/$/);
+  if (!match) {
+    return undefined;
+  }
+
+  const assetId = decodeURIComponent(match[1]!);
+  const accountUsername = typeof username === "function" ? username(assetId) : username;
+  return jsonResponse({
+    id: assetId,
+    permed_accounts: [
+      {
+        id: `${assetId}-account-id`,
+        alias: `${assetId}-account-id`,
+        name: accountUsername,
+        username: accountUsername,
+        has_secret: true
+      }
+    ]
   });
 }
 
