@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.8 — 2026-08-11
+
+### Changed
+
+- Replace the TypeScript 7 beta preview package and `tsgo` CLI with the official TypeScript 7.0.2 package and `tsc` CLI.
+
+### Security
+
+- Upgrade esbuild, PostCSS, and nanoid to patched releases that address the current npm audit findings.
+
 ## 0.1.7 — 2026-08-05
 
 ### Release note
