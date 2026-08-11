@@ -7,7 +7,7 @@ OpenAPI-driven CLI for JumpServer.
 ## Requirements
 
 - Node.js 22 or newer
-- TypeScript 7.0 Beta via `@typescript/native-preview@beta` and the `tsgo` CLI.
+- TypeScript 7 via the `typescript` package and the `tsc` CLI.
 
 ## Installation
 
