@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.9 — 2026-11-10
+
+### Fixed
+
+- Honor asset `match --limit` and `--offset` using the collection API to bypass JumpServer's fixed suggestion cap.
+
+### Added
+
+- Add asset `list` commands and `--all` pagination for limit/offset GET operations, preserving filters and signing every page.
+- Add CI compatibility checks for Node.js 22.12.0 and the latest Node.js 22, 24, and 26 releases.
+
+### Changed
+
+- Move project guidance from `CONTEXT.md` to `AGENTS.md` and the concepts guide in `docs/`.
+- Use Node.js 26 for development and npm releases, with the project version recorded in `.nvmrc`.
+- Correct the minimum supported runtime to Node.js 22.12.0 to match Commander 15.
+
+### Security
+
+- Upgrade Vitest to 4.1.12 and refresh Vite and source-map-js to patched versions, resolving all current npm audit findings.
+
 ## 0.1.8 — 2026-08-11
 
 ### Changed
