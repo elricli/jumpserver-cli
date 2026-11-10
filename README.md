@@ -6,8 +6,8 @@ OpenAPI-driven CLI for JumpServer.
 
 ## Requirements
 
-- Node.js 22 or newer
-- TypeScript 7 via the `typescript` package and the `tsc` CLI.
+- To install and run the CLI: Node.js 22.12.0 or newer, matching the minimum required by `commander@15`.
+- For development and npm releases: Node.js 26, selected by [`.nvmrc`](.nvmrc). TypeScript 7 is installed as a development dependency and provides the `tsc` CLI.
 
 ## Installation
 
@@ -80,8 +80,10 @@ Authentication is resolved as one complete mode from the highest-priority source
 
 ## Usage
 
+For local source usage, use Node.js 26 and install the locked dependencies:
+
 ```bash
-npm install
+npm ci
 npm run build
 
 npx tsx src/cli.ts api list --search profile
@@ -125,8 +127,9 @@ Request options:
 - `--query-host value` and similar `--query-*` options: query parameters whose names conflict with global or request options.
 - `--query name=value`: deprecated legacy query syntax; it prints a warning and will be removed in the next version.
 - `--param name=value`: path parameter if the name appears in the path template, otherwise query parameter.
-- `--limit 20`: result count for APIs that declare limit/offset pagination.
+- `--limit 20`: result count for APIs that declare limit/offset pagination; page size when used with `--all`.
 - `--offset 40`: starting result offset for APIs that declare limit/offset pagination.
+- `--all`: fetch every page of a GET API that declares limit/offset pagination (default page size: 100).
 - `--body '{"name":"value"}'`: JSON body.
 - `--body @payload.json`: JSON body from file.
 - `--body -`: JSON body from stdin.
@@ -134,6 +137,31 @@ Request options:
 - `--dry-run`: print a concise request preview without sending the request or exposing auth signatures.
 - `--include-headers`: include the HTTP status line.
 - `--json`: print the raw JSON response instead of the compact table.
+
+### Asset lists and pagination
+
+List database, host, or other asset records, using the same filter options as `match`:
+
+```bash
+jms assets databases list --limit 20
+jms assets hosts list --limit 20 --offset 40
+jms assets list --all
+jms assets databases list --all --json
+jms assets hosts list --search prod --all --limit 50
+```
+
+JumpServer's suggestions API caps matches before pagination. Asset `match` commands without pagination options keep using suggestions. Supplying `--limit`, `--offset`, or `--all` switches to the corresponding asset collection API so the suggestion cap does not truncate the result set:
+
+```bash
+jms assets databases match --limit 20
+jms assets hosts match --all
+```
+
+Collection requests use the target installation's asset-list permissions. These commands list inventory; the `token` commands use the current user's permitted assets for connection credentials.
+
+`--all` starts at `--offset` when provided and combines pages into one table or JSON response. For paginated JSON, `results` contains the collected records, `count` is the number collected, and `next` and `previous` are `null`. It preserves filters on every page and reports an error if a page fails or pagination stops advancing. Use `--dry-run` to preview the first request without fetching any pages.
+
+The same pagination option works on other GET operations that declare `limit` and `offset`, including `jms assets favorite-assets list --all` and `jms api call assets_hosts_match --all`.
 
 ## Connection Tokens
 
@@ -160,10 +188,20 @@ Asset name arguments support case-insensitive substrings plus `*` and `?` glob p
 
 ## Verification
 
+See [project concepts](docs/concepts.md) for the terminology used in operation discovery, authentication, and asset connections.
+
+Development and release builds use Node.js 26 from `.nvmrc`. If you use nvm, select it before installing dependencies and running checks:
+
 ```bash
+nvm install
+nvm use
+npm ci
 npm run verify
 npm run build
+npm audit
 ```
+
+CI runs verification, builds, a built-CLI check, and npm audit on the exact minimum Node.js 22.12.0 and the latest Node.js 22, 24, and 26 releases. Building with Node.js 26 preserves the declared runtime support for Node.js 22.12.0 and newer; source code and Node.js APIs must remain compatible with that minimum.
 
 The raw Swagger/OpenAPI export is intentionally not tracked or published. If you need to refresh the command catalog, place a local `api.json` in the repository root and run:
 
