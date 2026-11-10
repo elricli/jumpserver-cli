@@ -9,6 +9,26 @@ export interface QueryOptionBinding {
 
 const PAGINATION_QUERY_PARAMETER_NAMES = new Set(["limit", "offset"]);
 
+export function assetListOperation(operation: ApiOperation): ApiOperation | undefined {
+  if (operation.method !== "GET" || !/^\/assets\/[^/]+\/suggestions\/$/.test(operation.path) ||
+      !operation.operationId.endsWith("_match")) {
+    return undefined;
+  }
+
+  const operationId = operation.operationId.replace(/_match$/, "_list");
+  return {
+    ...operation,
+    path: operation.path.replace(/suggestions\/$/, ""),
+    operationId,
+    summary: operationId
+  };
+}
+
+export function supportsAllPages(operation: ApiOperation): boolean {
+  return operation.method === "GET" &&
+    ["limit", "offset"].every((name) => operation.queryParameters.some((parameter) => parameter.name === name));
+}
+
 export function operationCommandPath(operation: ApiOperation): string[] {
   const tagParts = operation.tag.split("_").filter((part) => part.length > 0);
   const actionText = operation.operationId.startsWith(`${operation.tag}_`)

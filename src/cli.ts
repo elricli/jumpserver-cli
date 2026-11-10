@@ -35,10 +35,13 @@ import {
 } from "./config.js";
 import { type ApiOperation, findOperation, loadOperations } from "./openapi.js";
 import {
+  assetListOperation,
   operationCommandPath,
   operationQueryOptionBindings,
+  supportsAllPages,
   type QueryOptionBinding
 } from "./operation-command.js";
+import { DEFAULT_LIST_PAGE_SIZE, fetchAllPages, paginationInteger } from "./pagination.js";
 import {
   createRequestPlan,
   mergeHeadersCaseInsensitive,
@@ -117,6 +120,7 @@ interface RequestCommandOptions {
   header?: string[];
   limit?: string;
   offset?: string;
+  all?: boolean;
   body?: string;
   dryRun?: boolean;
   includeHeaders?: boolean;
@@ -521,7 +525,12 @@ function runUpgradeProcess(command: string, args: string[]): Promise<number> {
 }
 
 function registerOperationCommands(parent: Command, operations: ApiOperation[], context: RunContext): void {
-  for (const operation of operations) {
+  const existingPaths = new Set(operations.map((operation) => operationCommandPath(operation).join(" ")));
+  const assetLists = operations.flatMap((operation) => {
+    const list = assetListOperation(operation);
+    return list && !existingPaths.has(operationCommandPath(list).join(" ")) ? [list] : [];
+  });
+  for (const operation of [...operations, ...assetLists]) {
     const path = operationCommandPath(operation);
     const operationCommand = getOrCreateCommandPath(parent, path);
     operationCommand.description(describeOperationCommand(operation));
@@ -535,6 +544,9 @@ function registerOperationCommands(parent: Command, operations: ApiOperation[], 
       await runOperation(operation, commandOptions, command, context, queryOptionBindings);
     });
     operationCommand.addHelpText("after", operationHelpDetails(operation, queryOptionBindings));
+    if (assetListOperation(operation)) {
+      operationCommand.addHelpText("after", "\nWith --limit, --offset, or --all, uses the asset list API to bypass the server's suggestion cap.\n");
+    }
   }
 }
 
@@ -889,8 +901,18 @@ async function runOperation(
     const host = resolveRequiredHost(globalOptions.host);
     warnDeprecatedQueryOption(commandOptions, context);
     const requestValues = collectRequestValues(operation, commandOptions, queryOptionBindings);
+    if (commandOptions.all) {
+      if (!supportsAllPages(operation)) {
+        throw new Error(`${operation.operationId} does not support --all. This requires a GET API with limit/offset pagination.`);
+      }
+      requestValues.queryValues.limit ??= String(DEFAULT_LIST_PAGE_SIZE);
+      paginationInteger(String(requestValues.queryValues.limit), "limit");
+      paginationInteger(String(requestValues.queryValues.offset ?? "0"), "offset");
+    }
+    const hasPagination = commandOptions.all || requestValues.queryValues.limit !== undefined || requestValues.queryValues.offset !== undefined;
+    const requestOperation = hasPagination ? assetListOperation(operation) ?? operation : operation;
     const planInput = {
-      operation,
+      operation: requestOperation,
       baseUrl: resolveBaseUrl(host),
       pathValues: requestValues.pathValues,
       queryValues: requestValues.queryValues,
@@ -901,19 +923,21 @@ async function runOperation(
       commandOptions.body === undefined ? planInput : { ...planInput, bodyInput: commandOptions.body }
     );
 
-    applyAuthHeaders(plan, operation, globalOptions, context.now());
-
     if (commandOptions.dryRun) {
-      context.stdout(formatDryRun(plan));
+      applyAuthHeaders(plan, requestOperation, globalOptions, context.now());
+      context.stdout(`${formatDryRun(plan)}${commandOptions.all ? "分页: 获取所有页\n" : ""}`);
       return;
     }
 
-    const requestInit = {
-      method: plan.method,
-      headers: plan.headers,
-      ...(plan.body !== undefined ? { body: plan.body } : {})
+    const fetchPage = async (page: RequestPlan): Promise<Response> => {
+      applyAuthHeaders(page, requestOperation, globalOptions, context.now());
+      return context.fetcher(page.url, {
+        method: page.method,
+        headers: page.headers,
+        ...(page.body !== undefined ? { body: page.body } : {})
+      });
     };
-    const response = await context.fetcher(plan.url, requestInit);
+    const response = commandOptions.all ? await fetchAllPages(plan, fetchPage) : await fetchPage(plan);
     await printResponse(response, commandOptions, context);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -2386,6 +2410,9 @@ function addRequestOptions(command: Command, operation?: ApiOperation): void {
   }
   if (!operation || operation.queryParameters.some((parameter) => parameter.name === "offset")) {
     command.option("--offset <number>", "Initial result offset for limit/offset paginated APIs");
+  }
+  if (!operation || supportsAllPages(operation)) {
+    command.option("--all", "Fetch all pages; --limit sets the page size (default: 100)");
   }
 
   command

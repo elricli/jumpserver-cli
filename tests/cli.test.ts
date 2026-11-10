@@ -2253,15 +2253,15 @@ describe("CLI command surface", () => {
     const cases: Array<{ commandPath: string[]; expectedPath: string }> = [
       {
         commandPath: ["assets", "match"],
-        expectedPath: "/api/v1/assets/assets/suggestions/"
+        expectedPath: "/api/v1/assets/assets/"
       },
       {
         commandPath: ["assets", "databases", "match"],
-        expectedPath: "/api/v1/assets/databases/suggestions/"
+        expectedPath: "/api/v1/assets/databases/"
       },
       {
         commandPath: ["assets", "hosts", "match"],
-        expectedPath: "/api/v1/assets/hosts/suggestions/"
+        expectedPath: "/api/v1/assets/hosts/"
       }
     ];
 
@@ -2414,7 +2414,7 @@ describe("CLI command surface", () => {
 
     expect(stderr).toEqual([]);
     expect(stdout.join("")).toContain(
-      "地址: https://jumpserver.example.test/api/v1/assets/assets/suggestions/?limit=20&offset=40"
+      "地址: https://jumpserver.example.test/api/v1/assets/assets/?limit=20&offset=40"
     );
   });
 
@@ -2425,8 +2425,10 @@ describe("CLI command surface", () => {
 
     expect(optionFlags(paginated)).toContain("--limit <number>");
     expect(optionFlags(paginated)).toContain("--offset <number>");
+    expect(optionFlags(paginated)).toContain("--all");
     expect(optionFlags(unpaginated)).not.toContain("--limit <number>");
     expect(optionFlags(unpaginated)).not.toContain("--offset <number>");
+    expect(optionFlags(unpaginated)).not.toContain("--all");
     expect(paginated?.options.find((option) => option.long === "--include-headers")?.description).toBe(
       "Include the HTTP status line in output"
     );
